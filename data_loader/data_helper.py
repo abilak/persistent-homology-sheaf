@@ -34,7 +34,7 @@ def load_dataset(ds_name):
                     curr_graph[j, int(vertex[k]), 0] = 1.
             curr_graph = normalize_graph(curr_graph)
             graphs.append(curr_graph)
-    graphs = np.array(graphs)
+    graphs = np.array(graphs, dtype=object)
     for i in range(graphs.shape[0]):
         graphs[i] = np.transpose(graphs[i], [2,0,1])
     return graphs, np.array(labels)

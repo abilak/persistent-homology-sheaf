@@ -2,6 +2,8 @@ import data_loader.data_helper as helper
 import utils.config
 import torch
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 class DataGenerator:
     def __init__(self, config):
@@ -65,7 +67,7 @@ class DataGenerator:
 
     def next_batch(self):
         graphs, labels = next(self.iter)
-        graphs, labels = torch.cuda.FloatTensor(graphs), torch.tensor(labels, device='cuda', dtype=self.labels_dtype)
+        graphs, labels = torch.tensor(graphs, device=DEVICE, dtype=torch.float32), torch.tensor(labels, device=DEVICE, dtype=self.labels_dtype)
         return graphs, labels
 
     # initialize an iterator from the data for one training epoch

@@ -5,9 +5,9 @@ import datetime
 
 NUM_LABELS = {'COLLAB':0, 'IMDBBINARY':0, 'IMDBMULTI':0, 'MUTAG':7, 'NCI1':37, 'NCI109':38, 'PROTEINS':3, 'PTC':22, 'DD':89, 'QM9': 18}
 NUM_CLASSES = {'COLLAB':3, 'IMDBBINARY':2, 'IMDBMULTI':3, 'MUTAG':2, 'NCI1':2, 'NCI109':2, 'PROTEINS':2, 'PTC':2, 'QM9': 12}
-LEARNING_RATES = {'COLLAB': 0.0001, 'IMDBBINARY': 0.00005, 'IMDBMULTI': 0.0001, 'MUTAG': 0.0001, 'NCI1':0.0001, 'NCI109':0.0001, 'PROTEINS': 0.001, 'PTC': 0.0001}
-DECAY_RATES = {'COLLAB': 0.5, 'IMDBBINARY': 0.5, 'IMDBMULTI': 0.75, 'MUTAG': 1.0, 'NCI1':0.75, 'NCI109':0.75, 'PROTEINS': 0.5, 'PTC': 1.0}
-CHOSEN_EPOCH = {'COLLAB': 150, 'IMDBBINARY': 100, 'IMDBMULTI': 150, 'MUTAG': 500, 'NCI1': 200, 'NCI109': 250, 'PROTEINS': 100, 'PTC': 400}
+LEARNING_RATES = {'COLLAB': 0.0001, 'IMDBBINARY': 0.00005, 'IMDBMULTI': 0.0001, 'MUTAG': 0.0005, 'NCI1':0.0001, 'NCI109':0.0001, 'PROTEINS': 0.001, 'PTC': 0.0001}
+DECAY_RATES = {'COLLAB': 0.5, 'IMDBBINARY': 0.5, 'IMDBMULTI': 0.75, 'MUTAG': 0.5, 'NCI1':0.75, 'NCI109':0.75, 'PROTEINS': 0.5, 'PTC': 1.0}
+CHOSEN_EPOCH = {'COLLAB': 150, 'IMDBBINARY': 100, 'IMDBMULTI': 150, 'MUTAG': 200, 'NCI1': 200, 'NCI109': 250, 'PROTEINS': 100, 'PTC': 180}
 TIME = '{:%Y_%m_%d_%H_%M_%S}'.format(datetime.datetime.now())
 
 
@@ -27,7 +27,7 @@ def get_config_from_json(json_file):
     return config
 
 
-def process_config(json_file, dataset_name):
+def process_config(json_file, dataset_name, use_topology=None):
     config = get_config_from_json(json_file)
     if dataset_name != '':
         config.dataset_name = dataset_name
@@ -47,6 +47,24 @@ def process_config(json_file, dataset_name):
     config.gpus_list = ",".join(['{}'.format(i) for i in range(config.n_gpus)])
     config.devices = ['/gpu:{}'.format(i) for i in range(config.n_gpus)]
     config.distributed_fold = None  # specific for distrib 10fold - override to use as a flag
+
+    # Topology defaults (for configs that don't specify these)
+    arch = config.architecture
+    if not hasattr(arch, 'use_topology'):
+        arch.use_topology = False
+    if not hasattr(arch, 'topo_hidden_dim'):
+        arch.topo_hidden_dim = 64
+    if not hasattr(arch, 'topo_max_ph_dim'):
+        arch.topo_max_ph_dim = 1
+    if not hasattr(arch, 'topo_num_stats'):
+        arch.topo_num_stats = 4
+    if not hasattr(arch, 'topo_max_simplex_dim'):
+        arch.topo_max_simplex_dim = 2
+
+    # CLI override
+    if use_topology is not None:
+        arch.use_topology = use_topology
+
     return config
 
 

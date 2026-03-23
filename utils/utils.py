@@ -13,5 +13,10 @@ def get_args():
         metavar='D',
         default='',
         help='The dataset name (overrides config file value)')
+    argparser.add_argument(
+        '--use_topology',
+        action='store_true',
+        default=None,
+        help='Enable persistent homology topology branch (overrides config)')
     args = argparser.parse_args()
     return args

@@ -28,7 +28,7 @@ def main():
     # then process the json configuration file
     try:
         args = get_args()
-        config = process_config(args.config, args.dataset_name)
+        config = process_config(args.config, args.dataset_name, use_topology=args.use_topology)
 
     except Exception as e:
         print("missing or invalid arguments {}".format(e))

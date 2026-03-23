@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import layers.layers as layers
 import layers.modules as modules
+from layers.topology import TopologyLayer, build_clique_complex
 
 
 class BaseModel(nn.Module):
@@ -16,12 +17,27 @@ class BaseModel(nn.Module):
         block_features = config.architecture.block_features  # List of number of features in each regular block
         original_features_num = config.node_labels + 1  # Number of features of the input
 
-        # First part - sequential mlp blocks
+        # Topology config (disabled by default for backward compat)
+        self.use_topology = getattr(config.architecture, 'use_topology', False)
+
+        # First part - sequential equivariant blocks + optional topology
         last_layer_features = original_features_num
         self.reg_blocks = nn.ModuleList()
+        self.topo_layers = nn.ModuleList() if self.use_topology else None
         for layer, next_layer_features in enumerate(block_features):
             mlp_block = modules.RegularBlock(config, last_layer_features, next_layer_features)
             self.reg_blocks.append(mlp_block)
+            if self.use_topology:
+                topo_hidden = getattr(config.architecture, 'topo_hidden_dim', 64)
+                topo_ph_dim = getattr(config.architecture, 'topo_max_ph_dim', 1)
+                topo_stats = getattr(config.architecture, 'topo_num_stats', 4)
+                self.topo_layers.append(
+                    TopologyLayer(eqv_features=next_layer_features,
+                                  filt_features=last_layer_features,
+                                  hidden_dim=topo_hidden,
+                                  max_ph_dim=topo_ph_dim,
+                                  num_stats=topo_stats)
+                )
             last_layer_features = next_layer_features
 
         # Second part
@@ -38,13 +54,32 @@ class BaseModel(nn.Module):
             self.fc_layers.append(modules.FullyConnected(512, 256))
             self.fc_layers.append(modules.FullyConnected(256, self.config.num_classes, activation_fn=None))
 
+    def _build_simplicial_complexes(self, input):
+        """Extract adjacency from channel 0 and build clique complexes per graph."""
+        adj_batch = input[:, 0, :, :].detach().cpu().numpy()
+        max_dim = getattr(self.config.architecture, 'topo_max_simplex_dim', 2)
+        return [build_clique_complex(adj, max_dim=max_dim) for adj in adj_batch]
+
     def forward(self, input):
         x = input
         scores = torch.tensor(0, device=input.device, dtype=x.dtype)
 
+        # Build simplicial complexes once from input adjacency
+        simplices_batch = None
+        if self.use_topology:
+            simplices_batch = self._build_simplicial_complexes(input)
+
         for i, block in enumerate(self.reg_blocks):
 
+            # Step 1: save pre-equivariant features for filtration
+            x_pre = x
+
+            # Step 2: equivariant update: X^(l+1/2) = EqvLayer(X^(l))
             x = block(x)
+
+            # Steps 3-6: topology (filtration on x_pre -> PH -> broadcast -> fuse with x)
+            if self.use_topology:
+                x = self.topo_layers[i](x, x_pre, simplices_batch)
 
             if self.config.architecture.new_suffix:
                 # use new suffix

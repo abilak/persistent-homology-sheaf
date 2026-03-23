@@ -5,6 +5,7 @@ This code is used to download the data used to train and test our model
 import os
 from six.moves import urllib
 import zipfile
+import certifi, ssl
 raw_dir = os.path.join(os.getcwd(), 'data')
 
 
@@ -21,7 +22,7 @@ def download_url(url, folder, filename):
 
     os.makedirs(folder, exist_ok=True)
 
-    data = urllib.request.urlopen(url)
+    data = urllib.request.urlopen(url, context=ssl.create_default_context(cafile=certifi.where()))
     path = os.path.join(folder, filename)
 
     with open(path, 'wb') as f:

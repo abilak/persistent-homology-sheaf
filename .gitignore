@@ -1,7 +1,7 @@
 .idea/
 data/
 data_loader/__pycache__/
-
+.venv
 
 layers/__pycache__/
 models/__pycache__/

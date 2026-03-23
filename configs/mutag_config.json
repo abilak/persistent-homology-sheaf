@@ -1,25 +1,24 @@
 {
-
-  "dataset_name":"COLLAB",
-  "max_to_keep":1,
-  "gpu": "5",
+  "dataset_name": "MUTAG",
+  "max_to_keep": 1,
+  "gpu": "0",
   "num_exp": 1,
   "exp_name": "10fold_cross_validation",
   "val_exist": true,
 
   "architecture": {
-    "block_features": [400,400,400],
+    "block_features": [64, 64],
     "depth_of_mlp": 2,
     "new_suffix": true,
-    "use_topology": false,
-    "topo_hidden_dim": 64,
+    "use_topology": true,
+    "topo_hidden_dim": 32,
     "topo_max_ph_dim": 1,
     "topo_num_stats": 4,
     "topo_max_simplex_dim": 2
   },
 
   "hyperparams": {
-    "batch_size": 5,
+    "batch_size": 20,
     "optimizer": "adam"
   }
 }

@@ -4,12 +4,14 @@ import torch
 import torch.nn.functional as F
 from models.base_model import BaseModel
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 class ModelWrapper(object):
     def __init__(self, config, data):
         self.config = config
         self.data = data
-        self.model = BaseModel(config).cuda()
+        self.model = BaseModel(config).to(DEVICE)
 
     # save function that saves the checkpoint in the path defined in the config file
     def save(self, best: bool, epoch: int, optimizer: torch.optim.Optimizer):
@@ -32,7 +34,7 @@ class ModelWrapper(object):
         print("Loading {}...".format(filename), end=' ')
         checkpoint = torch.load(os.path.join(self.config.checkpoint_dir, filename))
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model.to(torch.device('cuda'))
+        self.model.to(DEVICE)
         print("Model loaded.")
 
         return checkpoint['optimizer_state_dict'], checkpoint['epoch']
