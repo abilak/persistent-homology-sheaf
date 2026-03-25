@@ -90,39 +90,92 @@ class LearnedFiltration(nn.Module):
             list of B lists of (simplex_tuple, scalar_tensor)
         """
         B, d, M, _ = pair_features.shape
-        result = []
 
+        # Gather all simplex features across the batch for a single batched MLP call
+        all_feats = []
+        all_sigmas = []  # (batch_idx, sigma) for re-splitting
         for b in range(B):
-            graph_filt = []
             for dim_k in sorted(simplices_batch[b].keys()):
                 for sigma in simplices_batch[b][dim_k]:
                     pairs = ordered_pairs(sigma)
                     feat = sum(pair_features[b, :, i, j] for i, j in pairs)
-                    feat = feat / len(pairs)  # average over pairs to keep scale stable
-                    val = self.mlp(feat).squeeze(-1)
-                    graph_filt.append((sigma, val))
+                    all_feats.append(feat / len(pairs))
+                    all_sigmas.append((b, sigma))
 
-            result.append(graph_filt)
+        if len(all_feats) == 0:
+            return [[] for _ in range(B)]
+
+        # Single batched MLP forward pass
+        all_vals = self.mlp(torch.stack(all_feats)).squeeze(-1)  # (total_simplices,)
+
+        # Re-split into per-graph lists
+        result = [[] for _ in range(B)]
+        for idx, (b, sigma) in enumerate(all_sigmas):
+            result[b].append((sigma, all_vals[idx]))
 
         return result
 
 
 class DifferentiablePH(nn.Module):
     """
-    Differentiable persistent homology vectorization.
+    Differentiable persistent homology with learned vectorization.
 
     Uses gudhi for the combinatorial PH computation, but maintains gradient
-    flow by tracking which simplices cause births/deaths in the persistence
-    diagram and indexing back into the differentiable filtration tensor.
-
-    Vectorization: per homology dimension, computes
-        [count, sum_of_lifetimes, max_lifetime, mean_lifetime]
+    flow by:
+    1. Applying a differentiable make_filtration_non_decreasing to align
+       the computation graph with gudhi's adjusted filtration.
+    2. Tracking birth/death simplex pairs and indexing back into the
+       adjusted differentiable filtration tensor for lifetime computation.
+    3. Using learned attention-pooling over lifetime embeddings per homology
+       dimension.
     """
-    def __init__(self, max_ph_dim=1, num_stats=4):
+    def __init__(self, max_ph_dim=1, vec_dim=16):
         super().__init__()
         self.max_ph_dim = max_ph_dim
-        self.num_stats = num_stats
-        self.out_features = (max_ph_dim + 1) * num_stats
+        self.vec_dim = vec_dim
+        self.out_features = (max_ph_dim + 1) * vec_dim
+
+        # Per-dimension learned vectorizers
+        self.embeds = nn.ModuleList()
+        self.attns = nn.ModuleList()
+        for _ in range(max_ph_dim + 1):
+            self.embeds.append(nn.Sequential(
+                nn.Linear(1, vec_dim), nn.ReLU(), nn.Linear(vec_dim, vec_dim)
+            ))
+            self.attns.append(nn.Sequential(
+                nn.Linear(1, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)
+            ))
+
+    @staticmethod
+    def _make_non_decreasing(filt_tensor, simplices_list, simplex_to_idx):
+        """
+        Differentiable filtration non-decreasing correction.
+
+        Ensures f(face) <= f(coface) by propagating max values up the
+        simplex hierarchy using torch.max (which has subgradients).
+        """
+        adjusted = list(filt_tensor)  # list of scalar tensors
+
+        # Group simplices by dimension
+        by_dim = {}
+        for idx, sigma in enumerate(simplices_list):
+            by_dim.setdefault(len(sigma) - 1, []).append((idx, sigma))
+
+        for dim in sorted(by_dim.keys()):
+            if dim == 0:
+                continue
+            for idx, sigma in by_dim[dim]:
+                face_vals = []
+                for k in range(1, len(sigma)):
+                    for face in combinations(sigma, k):
+                        face_key = tuple(sorted(face))
+                        if face_key in simplex_to_idx:
+                            face_vals.append(adjusted[simplex_to_idx[face_key]])
+                if face_vals:
+                    max_face = torch.stack(face_vals).max()
+                    adjusted[idx] = torch.max(adjusted[idx], max_face)
+
+        return torch.stack(adjusted)
 
     def forward(self, filtration_batch, device):
         """
@@ -143,21 +196,28 @@ class DifferentiablePH(nn.Module):
             # Map each simplex to an index for differentiable lookup
             simplex_to_idx = {}
             filt_values = []
+            simplices_list = []
             for idx, (sigma, val) in enumerate(graph_filt):
                 simplex_to_idx[tuple(sorted(sigma))] = idx
                 filt_values.append(val)
+                simplices_list.append(sigma)
 
             filt_tensor = torch.stack(filt_values)
 
-            # Build gudhi simplex tree with detached values
+            # Differentiable non-decreasing correction
+            filt_adjusted = self._make_non_decreasing(
+                filt_tensor, simplices_list, simplex_to_idx)
+
+            # Build gudhi simplex tree with adjusted (detached) values
             st = gudhi.SimplexTree()
-            for sigma, val in graph_filt:
-                st.insert(list(sigma), filtration=val.detach().cpu().item())
-            st.make_filtration_non_decreasing()
+            for i, sigma in enumerate(simplices_list):
+                st.insert(list(sigma),
+                          filtration=filt_adjusted[i].detach().cpu().item())
+            st.make_filtration_non_decreasing()  # should be near no-op now
             st.persistence()
             pairs = st.persistence_pairs()
 
-            # Collect differentiable lifetimes per homology dimension
+            # Differentiable lifetimes via adjusted filtration tensor
             dim_lifetimes = {d: [] for d in range(self.max_ph_dim + 1)}
             for birth_simplex, death_simplex in pairs:
                 if len(death_simplex) == 0:
@@ -168,23 +228,23 @@ class DifferentiablePH(nn.Module):
                 birth_key = tuple(sorted(birth_simplex))
                 death_key = tuple(sorted(death_simplex))
                 if birth_key in simplex_to_idx and death_key in simplex_to_idx:
-                    lifetime = (filt_tensor[simplex_to_idx[death_key]]
-                                - filt_tensor[simplex_to_idx[birth_key]])
+                    lifetime = (filt_adjusted[simplex_to_idx[death_key]]
+                                - filt_adjusted[simplex_to_idx[birth_key]])
                     dim_lifetimes[dim].append(torch.clamp(lifetime, min=0))
 
-            # Vectorize: [count, sum, max, mean] per dimension
+            # Learned attention-pooling over lifetimes per dimension
             vec_parts = []
             for d in range(self.max_ph_dim + 1):
                 lts = dim_lifetimes[d]
                 if len(lts) == 0:
-                    vec_parts.append(torch.zeros(self.num_stats, device=device))
+                    vec_parts.append(torch.zeros(self.vec_dim, device=device))
                 else:
-                    lt_stack = torch.stack(lts)
-                    count = torch.tensor(float(len(lts)), device=device)
-                    total = lt_stack.sum()
-                    maximum = lt_stack.max()
-                    mean = lt_stack.mean()
-                    vec_parts.append(torch.stack([count, total, maximum, mean]))
+                    lt_col = torch.stack(lts).unsqueeze(-1)          # (N, 1)
+                    embeds = self.embeds[d](lt_col)                  # (N, vec_dim)
+                    attn_logits = self.attns[d](lt_col)              # (N, 1)
+                    attn_weights = torch.softmax(attn_logits, dim=0) # (N, 1)
+                    pooled = (attn_weights * embeds).sum(dim=0)      # (vec_dim,)
+                    vec_parts.append(pooled)
 
             vectors.append(torch.cat(vec_parts))
 
@@ -223,10 +283,13 @@ class TopologyLayer(nn.Module):
             nn.Conv2d(eqv_features, eqv_features,
                       kernel_size=1, bias=True),
         )
-        for m in self.fusion:
-            if isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
+        # First layer: Xavier init for good signal propagation
+        nn.init.xavier_uniform_(self.fusion[0].weight)
+        nn.init.zeros_(self.fusion[0].bias)
+        # Last layer: small-scale init so residual starts near identity
+        # but gradients flow to topology branch from step 1
+        nn.init.normal_(self.fusion[2].weight, std=0.01)
+        nn.init.zeros_(self.fusion[2].bias)
 
     def forward(self, x_eqv, x_filt, simplices_batch):
         """
@@ -250,8 +313,9 @@ class TopologyLayer(nn.Module):
         # Step 3: broadcast to all pairs
         topo_broadcast = topo_vec.unsqueeze(-1).unsqueeze(-1).expand(B, -1, M, M)
 
-        # Step 4: fuse post-equivariant features with topology
+        # Step 4: residual fusion — preserves expressivity lower bound
+        # At init, fusion outputs are small (0.01 std), so out ≈ x_eqv
         combined = torch.cat([x_eqv, topo_broadcast], dim=1)
-        out = self.fusion(combined)
+        out = x_eqv + self.fusion(combined)
 
         return out
