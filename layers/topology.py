@@ -148,10 +148,10 @@ class DifferentiablePH(nn.Module):
                 nn.Linear(2, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)
             ))
 
-        # Learnable "infinite persistence" value per homology dimension
-        # Essential features (never-dying components/cycles) use this
-        # instead of a death value that doesn't exist
-        self.inf_pers = nn.Parameter(torch.ones(max_ph_dim + 1))
+        # Learnable scale for essential (infinite persistence) features.
+        # The base persistence is max(filt) - birth (standard clipping),
+        # and this scalar lets the network modulate it per homology dim.
+        self.ess_scale = nn.Parameter(torch.ones(max_ph_dim + 1))
 
     @staticmethod
     def _make_non_decreasing(filt_tensor, simplices_list, simplex_to_idx):
@@ -230,6 +230,9 @@ class DifferentiablePH(nn.Module):
             st.persistence()
             pairs = st.persistence_pairs()
 
+            # Per-graph max filtration value for clipping essential features
+            filt_max = filt_adjusted.max()
+
             # Differentiable (birth, persistence) with node-involvement tracking
             # Includes both finite and essential (infinite persistence) features
             dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
@@ -244,8 +247,9 @@ class DifferentiablePH(nn.Module):
                 involved = set(birth_simplex)
 
                 if len(death_simplex) == 0:
-                    # Essential feature: use learned inf_pers as persistence
-                    persistence = torch.abs(self.inf_pers[dim])
+                    # Essential feature: clip at max filt, scaled by learned param
+                    persistence = torch.abs(self.ess_scale[dim]) * (
+                        filt_max - birth_val).clamp(min=0)
                 else:
                     death_key = tuple(sorted(death_simplex))
                     if death_key not in simplex_to_idx:
