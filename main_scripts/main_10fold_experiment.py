@@ -29,6 +29,13 @@ def main():
     try:
         args = get_args()
         config = process_config(args.config, args.dataset_name, use_topology=args.use_topology)
+        config.use_checkpoint = getattr(args, 'use_checkpoint', False)
+
+        # If resuming, reuse the existing experiment directory
+        if args.resume_dir:
+            config.use_checkpoint = True
+            config.summary_dir = os.path.join(args.resume_dir, "summary/")
+            config.checkpoint_dir = os.path.join(args.resume_dir, "checkpoint/")
 
     except Exception as e:
         print("missing or invalid arguments {}".format(e))
