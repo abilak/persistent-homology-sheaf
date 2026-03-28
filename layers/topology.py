@@ -136,14 +136,16 @@ class DifferentiablePH(nn.Module):
         self.out_features = (max_ph_dim + 1) * vec_dim
 
         # Per-dimension learned vectorizers
+        # Input is (birth, persistence) — 2D, following WKPI insight that
+        # position in the birth-persistence plane carries task-relevant info
         self.embeds = nn.ModuleList()
         self.attns = nn.ModuleList()
         for _ in range(max_ph_dim + 1):
             self.embeds.append(nn.Sequential(
-                nn.Linear(1, vec_dim), nn.ReLU(), nn.Linear(vec_dim, vec_dim)
+                nn.Linear(2, vec_dim), nn.ReLU(), nn.Linear(vec_dim, vec_dim)
             ))
             self.attns.append(nn.Sequential(
-                nn.Linear(1, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)
+                nn.Linear(2, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)
             ))
 
     @staticmethod
@@ -223,7 +225,7 @@ class DifferentiablePH(nn.Module):
             st.persistence()
             pairs = st.persistence_pairs()
 
-            # Differentiable lifetimes with node-involvement tracking
+            # Differentiable (birth, persistence) with node-involvement tracking
             dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
             for birth_simplex, death_simplex in pairs:
                 if len(death_simplex) == 0:
@@ -234,11 +236,12 @@ class DifferentiablePH(nn.Module):
                 birth_key = tuple(sorted(birth_simplex))
                 death_key = tuple(sorted(death_simplex))
                 if birth_key in simplex_to_idx and death_key in simplex_to_idx:
-                    lifetime = torch.clamp(
-                        filt_adjusted[simplex_to_idx[death_key]]
-                        - filt_adjusted[simplex_to_idx[birth_key]], min=0)
+                    birth_val = filt_adjusted[simplex_to_idx[birth_key]]
+                    death_val = filt_adjusted[simplex_to_idx[death_key]]
+                    persistence = torch.clamp(death_val - birth_val, min=0)
+                    bp = torch.stack([birth_val, persistence])  # (2,)
                     involved = set(birth_simplex) | set(death_simplex)
-                    dim_data[dim].append((lifetime, involved))
+                    dim_data[dim].append((bp, involved))
 
             # Attention-pooling: graph-level + node-level per dimension
             graph_parts = []
@@ -253,10 +256,9 @@ class DifferentiablePH(nn.Module):
                             torch.zeros(self.vec_dim, M, device=device))
                     continue
 
-                lts = torch.stack(
-                    [e[0] for e in entries]).unsqueeze(-1)      # (N, 1)
-                embeds = self.embeds[d](lts)                    # (N, vec_dim)
-                logits = self.attns[d](lts)                     # (N, 1)
+                bp = torch.stack([e[0] for e in entries])    # (N, 2)
+                embeds = self.embeds[d](bp)                     # (N, vec_dim)
+                logits = self.attns[d](bp)                      # (N, 1)
 
                 # Graph-level: attention pool over all pairs
                 weights = torch.softmax(logits, dim=0)          # (N, 1)
