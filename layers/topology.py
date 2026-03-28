@@ -148,6 +148,11 @@ class DifferentiablePH(nn.Module):
                 nn.Linear(2, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)
             ))
 
+        # Learnable "infinite persistence" value per homology dimension
+        # Essential features (never-dying components/cycles) use this
+        # instead of a death value that doesn't exist
+        self.inf_pers = nn.Parameter(torch.ones(max_ph_dim + 1))
+
     @staticmethod
     def _make_non_decreasing(filt_tensor, simplices_list, simplex_to_idx):
         """
@@ -226,22 +231,31 @@ class DifferentiablePH(nn.Module):
             pairs = st.persistence_pairs()
 
             # Differentiable (birth, persistence) with node-involvement tracking
+            # Includes both finite and essential (infinite persistence) features
             dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
             for birth_simplex, death_simplex in pairs:
-                if len(death_simplex) == 0:
-                    continue  # infinite persistence
                 dim = len(birth_simplex) - 1
                 if dim > self.max_ph_dim:
                     continue
                 birth_key = tuple(sorted(birth_simplex))
-                death_key = tuple(sorted(death_simplex))
-                if birth_key in simplex_to_idx and death_key in simplex_to_idx:
-                    birth_val = filt_adjusted[simplex_to_idx[birth_key]]
+                if birth_key not in simplex_to_idx:
+                    continue
+                birth_val = filt_adjusted[simplex_to_idx[birth_key]]
+                involved = set(birth_simplex)
+
+                if len(death_simplex) == 0:
+                    # Essential feature: use learned inf_pers as persistence
+                    persistence = torch.abs(self.inf_pers[dim])
+                else:
+                    death_key = tuple(sorted(death_simplex))
+                    if death_key not in simplex_to_idx:
+                        continue
                     death_val = filt_adjusted[simplex_to_idx[death_key]]
                     persistence = torch.clamp(death_val - birth_val, min=0)
-                    bp = torch.stack([birth_val, persistence])  # (2,)
-                    involved = set(birth_simplex) | set(death_simplex)
-                    dim_data[dim].append((bp, involved))
+                    involved = involved | set(death_simplex)
+
+                bp = torch.stack([birth_val, persistence])  # (2,)
+                dim_data[dim].append((bp, involved))
 
             # Attention-pooling: graph-level + node-level per dimension
             graph_parts = []
