@@ -18,7 +18,7 @@
   },
 
   "hyperparams": {
-    "batch_size": 20,
+    "batch_size": 32,
     "optimizer": "adam"
   }
 }
