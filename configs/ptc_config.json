@@ -11,9 +11,9 @@
     "depth_of_mlp": 2,
     "new_suffix": true,
     "use_topology": true,
-    "topo_hidden_dim": 16,
+    "topo_hidden_dim": 32,
     "topo_max_ph_dim": 1,
-    "topo_num_stats": 4,
+    "topo_num_stats": 8,
     "topo_max_simplex_dim": 2
   },
 

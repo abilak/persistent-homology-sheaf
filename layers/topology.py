@@ -177,21 +177,27 @@ class DifferentiablePH(nn.Module):
 
         return torch.stack(adjusted)
 
-    def forward(self, filtration_batch, device):
+    def forward(self, filtration_batch, device, num_nodes=None):
         """
         Args:
             filtration_batch: list of B lists of (simplex, filtration_value_tensor)
             device: torch device
+            num_nodes: M (padded graph size) for node-level features
 
         Returns:
-            B x out_features tensor (differentiable w.r.t. filtration values)
+            graph_vec: B x out_features tensor
+            node_vec:  B x out_features x M tensor (None if num_nodes is None)
         """
         B = len(filtration_batch)
 
         if not GUDHI_AVAILABLE:
-            return torch.zeros(B, self.out_features, device=device)
+            gv = torch.zeros(B, self.out_features, device=device)
+            nv = torch.zeros(B, self.out_features, num_nodes,
+                             device=device) if num_nodes else None
+            return gv, nv
 
         vectors = []
+        node_vectors = []
         for graph_filt in filtration_batch:
             # Map each simplex to an index for differentiable lookup
             simplex_to_idx = {}
@@ -217,8 +223,8 @@ class DifferentiablePH(nn.Module):
             st.persistence()
             pairs = st.persistence_pairs()
 
-            # Differentiable lifetimes via adjusted filtration tensor
-            dim_lifetimes = {d: [] for d in range(self.max_ph_dim + 1)}
+            # Differentiable lifetimes with node-involvement tracking
+            dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
             for birth_simplex, death_simplex in pairs:
                 if len(death_simplex) == 0:
                     continue  # infinite persistence
@@ -228,27 +234,58 @@ class DifferentiablePH(nn.Module):
                 birth_key = tuple(sorted(birth_simplex))
                 death_key = tuple(sorted(death_simplex))
                 if birth_key in simplex_to_idx and death_key in simplex_to_idx:
-                    lifetime = (filt_adjusted[simplex_to_idx[death_key]]
-                                - filt_adjusted[simplex_to_idx[birth_key]])
-                    dim_lifetimes[dim].append(torch.clamp(lifetime, min=0))
+                    lifetime = torch.clamp(
+                        filt_adjusted[simplex_to_idx[death_key]]
+                        - filt_adjusted[simplex_to_idx[birth_key]], min=0)
+                    involved = set(birth_simplex) | set(death_simplex)
+                    dim_data[dim].append((lifetime, involved))
 
-            # Learned attention-pooling over lifetimes per dimension
-            vec_parts = []
+            # Attention-pooling: graph-level + node-level per dimension
+            graph_parts = []
+            node_parts = []
+            M = num_nodes
             for d in range(self.max_ph_dim + 1):
-                lts = dim_lifetimes[d]
-                if len(lts) == 0:
-                    vec_parts.append(torch.zeros(self.vec_dim, device=device))
-                else:
-                    lt_col = torch.stack(lts).unsqueeze(-1)          # (N, 1)
-                    embeds = self.embeds[d](lt_col)                  # (N, vec_dim)
-                    attn_logits = self.attns[d](lt_col)              # (N, 1)
-                    attn_weights = torch.softmax(attn_logits, dim=0) # (N, 1)
-                    pooled = (attn_weights * embeds).sum(dim=0)      # (vec_dim,)
-                    vec_parts.append(pooled)
+                entries = dim_data[d]
+                if len(entries) == 0:
+                    graph_parts.append(torch.zeros(self.vec_dim, device=device))
+                    if M is not None:
+                        node_parts.append(
+                            torch.zeros(self.vec_dim, M, device=device))
+                    continue
 
-            vectors.append(torch.cat(vec_parts))
+                lts = torch.stack(
+                    [e[0] for e in entries]).unsqueeze(-1)      # (N, 1)
+                embeds = self.embeds[d](lts)                    # (N, vec_dim)
+                logits = self.attns[d](lts)                     # (N, 1)
 
-        return torch.stack(vectors)
+                # Graph-level: attention pool over all pairs
+                weights = torch.softmax(logits, dim=0)          # (N, 1)
+                graph_parts.append(
+                    (weights * embeds).sum(dim=0))              # (vec_dim,)
+
+                # Node-level: masked attention pool per node
+                if M is not None:
+                    N = len(entries)
+                    involve = torch.zeros(N, M, device=device)
+                    for k, (_, ns) in enumerate(entries):
+                        for n in ns:
+                            if n < M:
+                                involve[k, n] = 1.0
+                    logits_exp = logits.expand(-1, M)           # (N, M)
+                    masked = logits_exp.masked_fill(
+                        involve == 0, float('-inf'))
+                    node_w = torch.softmax(
+                        masked, dim=0).nan_to_num(0.0)          # (N, M)
+                    node_parts.append(
+                        torch.mm(embeds.t(), node_w))           # (vec_dim, M)
+
+            vectors.append(torch.cat(graph_parts))
+            if M is not None:
+                node_vectors.append(torch.cat(node_parts, dim=0))
+
+        graph_out = torch.stack(vectors)
+        node_out = torch.stack(node_vectors) if node_vectors else None
+        return graph_out, node_out
 
 
 class TopologyLayer(nn.Module):
@@ -258,14 +295,14 @@ class TopologyLayer(nn.Module):
         1. Filtration on pre-equivariant features:
            f(sigma) = rho( sum_{(i,j) in P(sigma)} X^(l)_ij )
         2. Persistent homology with differentiable vectorization:
-           T = Phi_PH(K(G), f)
-        3. Broadcast topology to all pairs:
-           T_uv = T  for all (u,v)
-        4. Fuse post-equivariant features with topology:
-           X^(l+1) = psi( X^(l+1/2) || T )
+           T_graph, {t_i} = Phi_PH(K(G), f)
+        3. Broadcast topology to all pairs (graph + node-level):
+           T_ij = [T_graph, t_i, t_j]
+        4. Gated residual fusion:
+           X^(l+1) = X^(l+1/2) + gate * psi( X^(l+1/2) || T_ij )
 
-    The filtration uses pre-equivariant features X^(l), while the
-    fusion combines post-equivariant features X^(l+1/2) with topology.
+    Node-level features t_i are computed by attention-pooling over
+    persistence pairs involving node i (parameter-shared with graph pool).
     """
     def __init__(self, eqv_features, filt_features, hidden_dim=64,
                  max_ph_dim=1, num_stats=4):
@@ -275,13 +312,14 @@ class TopologyLayer(nn.Module):
 
         topo_dim = self.ph.out_features
         self.topo_norm = nn.LayerNorm(topo_dim)
-        # Fusion MLP psi_ell: applied per pair via 1x1 convolutions
+        self.node_norm = nn.LayerNorm(topo_dim)
+
+        # Fusion input: x_eqv || T_graph || t_row || t_col
+        fuse_in = eqv_features + 3 * topo_dim
         self.fusion = nn.Sequential(
-            nn.Conv2d(eqv_features + topo_dim, eqv_features,
-                      kernel_size=1, bias=True),
+            nn.Conv2d(fuse_in, eqv_features, kernel_size=1, bias=True),
             nn.ReLU(),
-            nn.Conv2d(eqv_features, eqv_features,
-                      kernel_size=1, bias=True),
+            nn.Conv2d(eqv_features, eqv_features, kernel_size=1, bias=True),
         )
         # First layer: Xavier init for good signal propagation
         nn.init.xavier_uniform_(self.fusion[0].weight)
@@ -290,6 +328,12 @@ class TopologyLayer(nn.Module):
         # but gradients flow to topology branch from step 1
         nn.init.normal_(self.fusion[2].weight, std=0.01)
         nn.init.zeros_(self.fusion[2].bias)
+
+        # Learned gate: per-position control of topology contribution
+        self.gate_conv = nn.Conv2d(fuse_in, eqv_features,
+                                   kernel_size=1, bias=True)
+        nn.init.normal_(self.gate_conv.weight, std=0.01)
+        nn.init.constant_(self.gate_conv.bias, 2.0)  # sigmoid(2) ≈ 0.88
 
     def forward(self, x_eqv, x_filt, simplices_batch):
         """
@@ -303,19 +347,27 @@ class TopologyLayer(nn.Module):
         """
         B, d, M, _ = x_eqv.shape
 
-        # Steps 1-2: filtration on pre-equivariant features, then PH
+        # Steps 1-2: filtration → PH → graph + node vectors
         filt_batch = self.filtration(x_filt, simplices_batch)
-        topo_vec = self.ph(filt_batch, device=x_eqv.device)  # B x t
+        graph_vec, node_vec = self.ph(
+            filt_batch, device=x_eqv.device, num_nodes=M)
 
-        # Normalize PH statistics to match equivariant feature scale
-        topo_vec = self.topo_norm(topo_vec)
+        # Normalize topology features
+        graph_vec = self.topo_norm(graph_vec)                     # (B, t)
+        node_vec = self.node_norm(
+            node_vec.permute(0, 2, 1)).permute(0, 2, 1)           # (B, t, M)
 
-        # Step 3: broadcast to all pairs
-        topo_broadcast = topo_vec.unsqueeze(-1).unsqueeze(-1).expand(B, -1, M, M)
+        # Step 3: build per-pair topology features
+        graph_bc = graph_vec.unsqueeze(-1).unsqueeze(-1).expand(
+            B, -1, M, M)                                          # T_graph
+        node_row = node_vec.unsqueeze(-1).expand(B, -1, M, M)    # t_i
+        node_col = node_vec.unsqueeze(-2).expand(B, -1, M, M)    # t_j
 
-        # Step 4: residual fusion — preserves expressivity lower bound
-        # At init, fusion outputs are small (0.01 std), so out ≈ x_eqv
-        combined = torch.cat([x_eqv, topo_broadcast], dim=1)
-        out = x_eqv + self.fusion(combined)
+        # Step 4: gated residual fusion
+        combined = torch.cat(
+            [x_eqv, graph_bc, node_row, node_col], dim=1)
+        gate = torch.sigmoid(self.gate_conv(combined))
+        delta = self.fusion(combined)
+        out = x_eqv + gate * delta
 
         return out
