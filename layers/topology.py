@@ -5,6 +5,7 @@ from itertools import combinations, product
 
 try:
     import gudhi
+    print('yes')
     GUDHI_AVAILABLE = True
 except ImportError:
     GUDHI_AVAILABLE = False
