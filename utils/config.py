@@ -37,8 +37,8 @@ def process_config(json_file, dataset_name, use_topology=None):
     config.node_labels = NUM_LABELS[config.dataset_name]
     config.timestamp = TIME
     config.parent_dir = config.exp_name + config.dataset_name + TIME
-    config.summary_dir = os.path.join("../experiments", config.parent_dir, "summary/")
-    config.checkpoint_dir = os.path.join("../experiments", config.parent_dir, "checkpoint/")
+    config.summary_dir = os.path.join("experiments", config.parent_dir, "summary/")
+    config.checkpoint_dir = os.path.join("experiments", config.parent_dir, "checkpoint/")
     if config.exp_name == "10fold_cross_validation":
         config.num_epochs = CHOSEN_EPOCH[config.dataset_name]
         config.hyperparams.learning_rate = LEARNING_RATES[config.dataset_name]
