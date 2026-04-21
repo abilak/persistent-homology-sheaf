@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 import numpy as np
 from itertools import combinations, product
+from collections import defaultdict
 
 try:
     import gudhi
-    print('yes')
     GUDHI_AVAILABLE = True
 except ImportError:
     GUDHI_AVAILABLE = False
@@ -224,6 +224,17 @@ class DifferentiablePH(nn.Module):
             st.persistence()
             pairs = st.persistence_pairs()
 
+            # Build lookup: (dimension, filt_value) → set of all nodes from
+            # simplices with that dim and value. When filtration values tie,
+            # gudhi's pairing is labeling-dependent. Merging nodes from all
+            # same-dim same-value simplices makes node attribution equivariant.
+            val_to_nodes = defaultdict(set)
+            filt_vals_list = filt_adjusted.detach().tolist()
+            for idx, sigma in enumerate(simplices_list):
+                key = (len(sigma), round(filt_vals_list[idx], 6))
+                for v in sigma:
+                    val_to_nodes[key].add(v)
+
             # Differentiable lifetimes with node-involvement tracking
             dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
             for birth_simplex, death_simplex in pairs:
@@ -238,7 +249,14 @@ class DifferentiablePH(nn.Module):
                     lifetime = torch.clamp(
                         filt_adjusted[simplex_to_idx[death_key]]
                         - filt_adjusted[simplex_to_idx[birth_key]], min=0)
-                    involved = set(birth_simplex) | set(death_simplex)
+                    # Merge nodes from ALL simplices that share the same
+                    # (dimension, filt_value) as the birth or death simplex.
+                    # This makes node attribution invariant to gudhi's
+                    # labeling-dependent tie-breaking.
+                    bv_r = round(filt_vals_list[simplex_to_idx[birth_key]], 6)
+                    dv_r = round(filt_vals_list[simplex_to_idx[death_key]], 6)
+                    involved = (val_to_nodes[(len(birth_simplex), bv_r)]
+                                | val_to_nodes[(len(death_simplex), dv_r)])
                     dim_data[dim].append((lifetime, involved))
 
             # Attention-pooling: graph-level + node-level per dimension
