@@ -3,6 +3,9 @@ from easydict import EasyDict
 import os
 import datetime
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+EXPERIMENTS_ROOT = os.path.join(PROJECT_ROOT, "experiments")
+
 NUM_LABELS = {'COLLAB':0, 'IMDBBINARY':0, 'IMDBMULTI':0, 'MUTAG':7, 'NCI1':37, 'NCI109':38, 'PROTEINS':3, 'PTC':22, 'DD':89, 'QM9': 18}
 NUM_CLASSES = {'COLLAB':3, 'IMDBBINARY':2, 'IMDBMULTI':3, 'MUTAG':2, 'NCI1':2, 'NCI109':2, 'PROTEINS':2, 'PTC':2, 'QM9': 12}
 LEARNING_RATES = {'COLLAB': 0.0001, 'IMDBBINARY': 0.00005, 'IMDBMULTI': 0.0001, 'MUTAG': 0.0005, 'NCI1':0.0001, 'NCI109':0.0001, 'PROTEINS': 0.001, 'PTC': 0.0001}
@@ -37,8 +40,8 @@ def process_config(json_file, dataset_name, use_topology=None):
     config.node_labels = NUM_LABELS[config.dataset_name]
     config.timestamp = TIME
     config.parent_dir = config.exp_name + config.dataset_name + TIME
-    config.summary_dir = os.path.join("experiments", config.parent_dir, "summary/")
-    config.checkpoint_dir = os.path.join("experiments", config.parent_dir, "checkpoint/")
+    config.summary_dir = os.path.join(EXPERIMENTS_ROOT, config.parent_dir, "summary/")
+    config.checkpoint_dir = os.path.join(EXPERIMENTS_ROOT, config.parent_dir, "checkpoint/")
     if config.exp_name == "10fold_cross_validation":
         config.num_epochs = CHOSEN_EPOCH[config.dataset_name]
         config.hyperparams.learning_rate = LEARNING_RATES[config.dataset_name]
