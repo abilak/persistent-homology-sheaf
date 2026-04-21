@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from itertools import combinations, product
+from collections import defaultdict
 
 try:
     import gudhi
@@ -233,6 +234,23 @@ class DifferentiablePH(nn.Module):
             # Per-graph max filtration value for clipping essential features
             filt_max = filt_adjusted.max()
 
+            # All vertices in this graph (for essential feature node attribution)
+            all_vertices = set()
+            for sigma in simplices_list:
+                for v in sigma:
+                    all_vertices.add(v)
+
+            # Build lookup: (dimension, filt_value) → set of all nodes from
+            # simplices with that dim and value. When filtration values tie,
+            # gudhi's pairing is labeling-dependent. Merging nodes from all
+            # same-dim same-value simplices makes node attribution equivariant.
+            val_to_nodes = defaultdict(set)
+            filt_vals_list = filt_adjusted.detach().tolist()
+            for idx, sigma in enumerate(simplices_list):
+                key = (len(sigma), round(filt_vals_list[idx], 6))
+                for v in sigma:
+                    val_to_nodes[key].add(v)
+
             # Differentiable (birth, persistence) with node-involvement tracking
             # Includes both finite and essential (infinite persistence) features
             dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
@@ -244,19 +262,29 @@ class DifferentiablePH(nn.Module):
                 if birth_key not in simplex_to_idx:
                     continue
                 birth_val = filt_adjusted[simplex_to_idx[birth_key]]
-                involved = set(birth_simplex)
 
                 if len(death_simplex) == 0:
                     # Essential feature: clip at max filt, scaled by learned param
                     persistence = torch.abs(self.ess_scale[dim]) * (
                         filt_max - birth_val).clamp(min=0)
+                    # Essential features are global topological invariants;
+                    # gudhi's representative simplex is labeling-dependent,
+                    # so involve all vertices for equivariant node attribution.
+                    involved = all_vertices
                 else:
                     death_key = tuple(sorted(death_simplex))
                     if death_key not in simplex_to_idx:
                         continue
                     death_val = filt_adjusted[simplex_to_idx[death_key]]
                     persistence = torch.clamp(death_val - birth_val, min=0)
-                    involved = involved | set(death_simplex)
+                    # Merge nodes from ALL simplices that share the same
+                    # (dimension, filt_value) as the birth or death simplex.
+                    # This makes node attribution invariant to gudhi's
+                    # labeling-dependent tie-breaking.
+                    bv_r = round(filt_vals_list[simplex_to_idx[birth_key]], 6)
+                    dv_r = round(filt_vals_list[simplex_to_idx[death_key]], 6)
+                    involved = (val_to_nodes[(len(birth_simplex), bv_r)]
+                                | val_to_nodes[(len(death_simplex), dv_r)])
 
                 bp = torch.stack([birth_val, persistence])  # (2,)
                 dim_data[dim].append((bp, involved))
@@ -275,6 +303,8 @@ class DifferentiablePH(nn.Module):
                     continue
 
                 bp = torch.stack([e[0] for e in entries])    # (N, 2)
+                # Normalize birth/persistence to zero-mean unit-variance
+                bp = (bp - bp.mean(dim=0)) / (bp.std(dim=0) + 1e-8)
                 embeds = self.embeds[d](bp)                     # (N, vec_dim)
                 logits = self.attns[d](bp)                      # (N, 1)
 
