@@ -26,6 +26,6 @@ def get_args():
     argparser.add_argument(
         '--resume_dir',
         default=None,
-        help='Path to existing experiment dir to resume from (e.g. ../experiments/10fold_...)')
+        help='Path to existing experiment dir to resume from (e.g. experiments/10fold_...)')
     args = argparser.parse_args()
     return args
