@@ -257,6 +257,9 @@ class DifferentiablePH(nn.Module):
                     continue
 
                 bp = torch.stack([e[0] for e in entries])    # (N, 2)
+                # Per-graph, per-dimension normalization: zero-mean, unit-var
+                # This is permutation-invariant (statistics over a set).
+                bp = (bp - bp.mean(dim=0)) / (bp.std(dim=0) + 1e-8)
                 embeds = self.embeds[d](bp)                     # (N, vec_dim)
                 logits = self.attns[d](bp)                      # (N, 1)
 
