@@ -9,3 +9,4 @@ trainers/__pycache__/
 utils/__pycache__/
 
 .vscode/
+.claude/

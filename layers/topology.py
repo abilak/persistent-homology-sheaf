@@ -91,25 +91,54 @@ class LearnedFiltration(nn.Module):
             list of B lists of (simplex_tuple, scalar_tensor)
         """
         B, d, M, _ = pair_features.shape
+        device = pair_features.device
 
-        # Gather all simplex features across the batch for a single batched MLP call
-        all_feats = []
-        all_sigmas = []  # (batch_idx, sigma) for re-splitting
+        # Walk all simplices once; build flat pair-index arrays for a single
+        # vectorized gather + scatter-add. Order matches the original serial
+        # loop so the returned list aligns with downstream consumers.
+        all_sigmas = []         # list of (batch_idx, sigma)
+        pair_b = []             # batch index per ordered pair
+        pair_i = []             # row index per ordered pair
+        pair_j = []             # col index per ordered pair
+        pair_simplex = []       # simplex index per ordered pair
+        pair_count = []         # |sigma|^2 per simplex
+
         for b in range(B):
             for dim_k in sorted(simplices_batch[b].keys()):
                 for sigma in simplices_batch[b][dim_k]:
-                    pairs = ordered_pairs(sigma)
-                    feat = sum(pair_features[b, :, i, j] for i, j in pairs)
-                    all_feats.append(feat / len(pairs))
+                    s_idx = len(all_sigmas)
                     all_sigmas.append((b, sigma))
+                    pair_count.append(len(sigma) * len(sigma))
+                    for i in sigma:
+                        for j in sigma:
+                            pair_b.append(b)
+                            pair_i.append(i)
+                            pair_j.append(j)
+                            pair_simplex.append(s_idx)
 
-        if len(all_feats) == 0:
+        S = len(all_sigmas)
+        if S == 0:
             return [[] for _ in range(B)]
 
-        # Single batched MLP forward pass
-        all_vals = self.mlp(torch.stack(all_feats)).squeeze(-1)  # (total_simplices,)
+        idx_b = torch.as_tensor(pair_b, dtype=torch.long, device=device)
+        idx_i = torch.as_tensor(pair_i, dtype=torch.long, device=device)
+        idx_j = torch.as_tensor(pair_j, dtype=torch.long, device=device)
+        idx_s = torch.as_tensor(pair_simplex, dtype=torch.long, device=device)
+        counts = torch.as_tensor(pair_count, dtype=pair_features.dtype,
+                                 device=device)
 
-        # Re-split into per-graph lists
+        # Gather all pair features in one shot: (P, d).
+        pair_vals = pair_features[idx_b, :, idx_i, idx_j]
+
+        # Scatter-sum per simplex, then mean.
+        simplex_sums = torch.zeros(S, d, device=device, dtype=pair_vals.dtype)
+        simplex_sums = simplex_sums.index_add(0, idx_s, pair_vals)
+        simplex_means = simplex_sums / counts.unsqueeze(-1)
+
+        # Single batched MLP forward pass.
+        all_vals = self.mlp(simplex_means).squeeze(-1)  # (S,)
+
+        # Re-split into per-graph lists (same ordering as old code).
         result = [[] for _ in range(B)]
         for idx, (b, sigma) in enumerate(all_sigmas):
             result[b].append((sigma, all_vals[idx]))
