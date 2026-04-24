@@ -4,7 +4,7 @@ import os
 import json
 
 
-BASE_DIR = os.path.abspath("../experiments")
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, "experiments"))
 
 
 def write_to_file_doc(train_acc, train_loss, val_acc, val_loss, epoch, config):
