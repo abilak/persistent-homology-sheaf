@@ -183,29 +183,61 @@ class DifferentiablePH(nn.Module):
 
         Ensures f(face) <= f(coface) by propagating max values up the
         simplex hierarchy using torch.max (which has subgradients).
-        """
-        adjusted = list(filt_tensor)  # list of scalar tensors
 
-        # Group simplices by dimension
+        Vectorized over simplices within each dimension. Dimensions are still
+        processed in ascending order because dim-d corrections depend on the
+        already-corrected dim-(d-1) values. Within a dimension all simplices
+        have the same number of proper faces (2^(dim+1) - 2 in a clique
+        complex), so the face-index table is a dense (S_d, F_d) tensor.
+        """
+        adjusted = filt_tensor.clone()  # shape (S,), autograd-tracked
+
+        # Group simplex indices by dimension
         by_dim = {}
         for idx, sigma in enumerate(simplices_list):
-            by_dim.setdefault(len(sigma) - 1, []).append((idx, sigma))
+            by_dim.setdefault(len(sigma) - 1, []).append(idx)
 
-        for dim in sorted(by_dim.keys()):
-            if dim == 0:
+        if not by_dim:
+            return adjusted
+        max_dim = max(by_dim.keys())
+
+        device = adjusted.device
+        for dim in range(1, max_dim + 1):
+            if dim not in by_dim:
                 continue
-            for idx, sigma in by_dim[dim]:
-                face_vals = []
+            sim_idx_list = by_dim[dim]
+
+            # Build a face-index table for every simplex at this dimension.
+            # Order of faces follows combinations(sigma, k) for k in 1..dim
+            # — same enumeration as the reference implementation, so the
+            # max is taken over the same set in the same order.
+            face_rows = []
+            for idx in sim_idx_list:
+                sigma = simplices_list[idx]
+                row = []
                 for k in range(1, len(sigma)):
                     for face in combinations(sigma, k):
-                        face_key = tuple(sorted(face))
-                        if face_key in simplex_to_idx:
-                            face_vals.append(adjusted[simplex_to_idx[face_key]])
-                if face_vals:
-                    max_face = torch.stack(face_vals).max()
-                    adjusted[idx] = torch.max(adjusted[idx], max_face)
+                        row.append(simplex_to_idx[tuple(sorted(face))])
+                face_rows.append(row)
+            if not face_rows:
+                continue
 
-        return torch.stack(adjusted)
+            sim_idx_t = torch.as_tensor(sim_idx_list, dtype=torch.long,
+                                        device=device)
+            face_idx_t = torch.as_tensor(face_rows, dtype=torch.long,
+                                         device=device)
+
+            face_vals = adjusted[face_idx_t]              # (S_d, F_d)
+            max_face = face_vals.max(dim=1).values        # (S_d,)
+            current = adjusted[sim_idx_t]                 # (S_d,)
+            new_val = torch.max(current, max_face)        # (S_d,)
+
+            # Out-of-place scatter: overwrites positions in sim_idx_t with
+            # new_val, autograd-aware (gradient routes to new_val at those
+            # positions and to old adjusted everywhere else).
+            adjusted = adjusted.scatter(0, sim_idx_t, new_val)
+
+        return adjusted
 
     def forward(self, filtration_batch, device, num_nodes=None):
         """
