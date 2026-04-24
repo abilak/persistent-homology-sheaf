@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 from itertools import combinations, product
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import gudhi
@@ -135,6 +136,7 @@ class DifferentiablePH(nn.Module):
         self.max_ph_dim = max_ph_dim
         self.vec_dim = vec_dim
         self.out_features = (max_ph_dim + 1) * vec_dim
+        self._pool = ThreadPoolExecutor(max_workers=8)
 
         # Per-dimension learned vectorizers
         self.embeds = nn.ModuleList()
@@ -146,6 +148,24 @@ class DifferentiablePH(nn.Module):
             self.attns.append(nn.Sequential(
                 nn.Linear(1, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)
             ))
+
+    @staticmethod
+    def _gudhi_worker(simplices_list, filt_detached):
+        """Run gudhi PH on a single graph. Called in a thread pool.
+        
+        Args:
+            simplices_list: list of simplex tuples
+            filt_detached: list of float filtration values (detached)
+            
+        Returns:
+            list of persistence pairs from gudhi
+        """
+        st = gudhi.SimplexTree()
+        for i, sigma in enumerate(simplices_list):
+            st.insert(list(sigma), filtration=filt_detached[i])
+        st.make_filtration_non_decreasing()
+        st.persistence()
+        return st.persistence_pairs()
 
     @staticmethod
     def _make_non_decreasing(filt_tensor, simplices_list, simplex_to_idx):
@@ -199,8 +219,10 @@ class DifferentiablePH(nn.Module):
 
         vectors = []
         node_vectors = []
+
+        # --- Phase 1: prepare per-graph data (differentiable) ---
+        graph_data = []
         for graph_filt in filtration_batch:
-            # Map each simplex to an index for differentiable lookup
             simplex_to_idx = {}
             filt_values = []
             simplices_list = []
@@ -210,28 +232,38 @@ class DifferentiablePH(nn.Module):
                 simplices_list.append(sigma)
 
             filt_tensor = torch.stack(filt_values)
-
-            # Differentiable non-decreasing correction
             filt_adjusted = self._make_non_decreasing(
                 filt_tensor, simplices_list, simplex_to_idx)
+            filt_detached = filt_adjusted.detach().cpu().tolist()
 
-            # Build gudhi simplex tree with adjusted (detached) values
-            st = gudhi.SimplexTree()
-            for i, sigma in enumerate(simplices_list):
-                st.insert(list(sigma),
-                          filtration=filt_adjusted[i].detach().cpu().item())
-            st.make_filtration_non_decreasing()  # should be near no-op now
-            st.persistence()
-            pairs = st.persistence_pairs()
+            graph_data.append({
+                'simplex_to_idx': simplex_to_idx,
+                'simplices_list': simplices_list,
+                'filt_adjusted': filt_adjusted,
+                'filt_detached': filt_detached,
+            })
 
-            # Build lookup: (dimension, filt_value) → set of all nodes from
-            # simplices with that dim and value. When filtration values tie,
-            # gudhi's pairing is labeling-dependent. Merging nodes from all
-            # same-dim same-value simplices makes node attribution equivariant.
+        # --- Phase 2: parallel gudhi calls across batch ---
+        futures = [
+            self._pool.submit(
+                self._gudhi_worker,
+                gd['simplices_list'],
+                gd['filt_detached'])
+            for gd in graph_data
+        ]
+        all_pairs = [f.result() for f in futures]
+
+        # --- Phase 3: differentiable lifetime + node attribution ---
+        for b, (gd, pairs) in enumerate(zip(graph_data, all_pairs)):
+            simplex_to_idx = gd['simplex_to_idx']
+            simplices_list = gd['simplices_list']
+            filt_adjusted = gd['filt_adjusted']
+            filt_detached = gd['filt_detached']
+
+            # Build tie-merge lookup
             val_to_nodes = defaultdict(set)
-            filt_vals_list = filt_adjusted.detach().tolist()
             for idx, sigma in enumerate(simplices_list):
-                key = (len(sigma), round(filt_vals_list[idx], 6))
+                key = (len(sigma), round(filt_detached[idx], 6))
                 for v in sigma:
                     val_to_nodes[key].add(v)
 
@@ -253,8 +285,8 @@ class DifferentiablePH(nn.Module):
                     # (dimension, filt_value) as the birth or death simplex.
                     # This makes node attribution invariant to gudhi's
                     # labeling-dependent tie-breaking.
-                    bv_r = round(filt_vals_list[simplex_to_idx[birth_key]], 6)
-                    dv_r = round(filt_vals_list[simplex_to_idx[death_key]], 6)
+                    bv_r = round(filt_detached[simplex_to_idx[birth_key]], 6)
+                    dv_r = round(filt_detached[simplex_to_idx[death_key]], 6)
                     involved = (val_to_nodes[(len(birth_simplex), bv_r)]
                                 | val_to_nodes[(len(death_simplex), dv_r)])
                     dim_data[dim].append((lifetime, involved))
