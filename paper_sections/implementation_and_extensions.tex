@@ -1,0 +1,491 @@
+% =================================================================
+% Section: Implementation Details
+% =================================================================
+
+\section{Implementation}
+\label{sec:implementation}
+
+We now describe the concrete instantiation of the architecture from Section~\ref{sec:architecture}. The implementation deviates from the idealised description in several practically motivated ways; we identify each deviation and verify that it preserves the equivariance and invariance properties required by our expressivity results.
+
+\subsection{Overall pipeline}
+
+The model operates on batches of graphs, each represented as a padded $M \times M \times d$ tensor where $M$ is the maximum number of nodes in the batch and $d$ is the feature dimension. Channel~$0$ of the input encodes the adjacency matrix; remaining channels encode node labels (if any) broadcast to the diagonal. At each layer $\ell$, the pipeline is:
+
+\begin{enumerate}
+    \item \textbf{Save pre-equivariant features}: $X^{(\ell)}_{\mathrm{pre}} = X^{(\ell)}$.
+    \item \textbf{Equivariant update}: $X^{(\ell+\frac{1}{2})} = \mathrm{EqvLayer}_\ell(X^{(\ell)})$, implemented as the \texttt{RegularBlock} of \cite{maron2019provably}, which composes parallel MLPs with matrix multiplication to produce a $2$nd-order equivariant map.
+    \item \textbf{Topology branch}: $X^{(\ell+1)} = \mathrm{TopologyLayer}_\ell(X^{(\ell+\frac{1}{2})}, X^{(\ell)}_{\mathrm{pre}})$, described in detail below.
+\end{enumerate}
+
+\noindent The filtration is constructed from $X^{(\ell)}_{\mathrm{pre}}$ (the \emph{pre}-equivariant features) rather than $X^{(\ell+\frac{1}{2})}$. This is because the filtration requires access to the full pairwise tensor before the equivariant update, since the MLP applied to simplex feature aggregates must receive features that are equivariant with respect to the \emph{input} labelling rather than the \emph{post-update} labelling. Since $X^{(\ell)}_{\mathrm{pre}}$ is equivariant (by induction on $\ell$), this choice preserves Lemma~\ref{lem:filt_equiv}.
+
+The simplicial complex $K(G)$ is constructed once from the input adjacency and reused at every layer.
+
+
+\subsection{Simplicial complex construction}
+
+Given an adjacency matrix $A \in \{0,1\}^{n \times n}$, we build the \emph{clique complex} $K(G)$ up to a configurable maximum dimension $d_{\max}$. Concretely:
+\begin{itemize}
+    \item $0$-simplices: all vertices $\{(i) : i \in V\}$,
+    \item $1$-simplices: all edges $\{(i,j) : i < j,\; A_{ij} \neq 0\}$,
+    \item $2$-simplices (if $d_{\max} \geq 2$): all triangles $\{(i,j,k) : (i,j),(i,k),(j,k) \in K_1\}$.
+\end{itemize}
+Higher cliques are enumerated analogously. Since the clique complex is a purely combinatorial object determined by the edge set, and the edge set is invariant under permutation of labels (the adjacency matrix transforms as $A \mapsto P A P^\top$, preserving the set of nonzero entries), the clique complex $K(G)$ is isomorphism-invariant up to relabelling of vertices.
+
+
+\subsection{Learned filtration}
+
+For each simplex $\sigma \in K(G)$, we define a filtration value
+\[
+    f(\sigma) = \rho\!\left( \frac{1}{|P(\sigma)|} \sum_{(i,j) \in P(\sigma)} X_{ij} \right),
+\]
+where $P(\sigma) = \sigma \times \sigma$ is the set of all ordered pairs of vertices in $\sigma$, $X \in \R^{d \times M \times M}$ is the pairwise feature tensor, and $\rho: \R^d \to \R$ is a shared two-layer MLP with hidden dimension $h$ and Xavier initialisation. The averaging by $|P(\sigma)|$ normalises across simplices of different dimensions (a vertex contributes $1$ pair, an edge contributes $4$, a triangle contributes $9$).
+
+\begin{remark}[Equivariance preservation]
+The proof of Lemma~\ref{lem:filt_equiv} applies directly: the sum over $P(\sigma)$ is invariant to relabelling of vertices within $\sigma$, so $f(g \cdot \sigma) = f(\sigma)$ for all $g \in S_n$. The averaging normalisation does not affect this, since $|P(g \cdot \sigma)| = |P(\sigma)|$.
+\end{remark}
+
+The MLP features for all simplices across the batch are gathered into a single tensor and processed in a single forward pass, avoiding per-simplex overhead.
+
+
+\subsection{Differentiable persistent homology}
+\label{sec:diff_ph}
+
+We use \textsc{gudhi}~\cite{gudhi2014} for the combinatorial persistent homology computation, but maintain gradient flow through the filtration values by the following three-step strategy.
+
+\paragraph{Step 1: Differentiable non-decreasing correction.}
+A valid filtration requires $f(\tau) \leq f(\sigma)$ whenever $\tau$ is a face of $\sigma$. The learned MLP $\rho$ does not enforce this constraint. We apply a differentiable correction: for each simplex $\sigma$ of dimension $\geq 1$, we set
+\[
+    \tilde{f}(\sigma) = \max\!\big(f(\sigma),\; \max_{\tau \subsetneq \sigma} \tilde{f}(\tau)\big),
+\]
+processing simplices in order of increasing dimension. Since $\max$ is piecewise linear with subgradients, this operation is differentiable almost everywhere and gradients propagate through the selected branch.
+
+\paragraph{Step 2: Persistence computation.}
+We build a \textsc{gudhi} simplex tree using the \emph{detached} corrected values $\tilde{f}(\sigma)$ (stopping gradient flow through the combinatorial algorithm) and compute persistence pairs $\{(b_i, d_i)\}$. Each pair identifies a birth simplex $\sigma_b$ and a death simplex $\sigma_d$ such that the homological feature born at $\tilde{f}(\sigma_b)$ dies at $\tilde{f}(\sigma_d)$.
+
+\paragraph{Step 3: Differentiable lifetime computation.}
+For each finite persistence pair $(\sigma_b, \sigma_d)$, we compute the lifetime using the \emph{differentiable} corrected filtration values:
+\[
+    \ell_i = \max\!\big(\tilde{f}(\sigma_d) - \tilde{f}(\sigma_b),\; 0\big).
+\]
+The $\max(\cdot, 0)$ clamp ensures non-negative lifetimes; the use of the differentiable $\tilde{f}$ (rather than the detached values passed to \textsc{gudhi}) ensures that gradients flow from the loss through the lifetimes back to the filtration MLP.
+
+\begin{remark}[Correctness of the gradient path]
+\label{rmk:grad_path}
+The detachment in Step~2 means that the \emph{pairing} (which simplex kills which) is treated as a discrete, non-differentiable operation. However, \emph{conditional on a fixed pairing}, the lifetime $\ell_i = \tilde{f}(\sigma_d) - \tilde{f}(\sigma_b)$ is a smooth function of the MLP parameters. This ``detach-and-reindex'' strategy is standard in differentiable topology layers~\cite{bruel2019topology, carriere2021optimizing} and is correct whenever the persistence pairing is locally constant---which holds generically (for all but a measure-zero set of filtration values).
+\end{remark}
+
+\paragraph{Discarding essential features.}
+Persistence pairs with $\sigma_d = \emptyset$ correspond to \emph{essential} (infinite persistence) features---topological classes that are born but never die within the filtration. In our base implementation, we discard these pairs. This is a deliberate simplification: essential features carry information (e.g., the number of connected components via $H_0$ essential classes), but their node-level attribution is problematic because the representative birth simplex chosen by \textsc{gudhi} is labelling-dependent and the feature is inherently global. We address this limitation in Section~\ref{sec:extensions}.
+
+
+\subsection{Learned vectorisation via attention pooling}
+
+Given the set of lifetimes $\{\ell_i\}_{i=1}^{N_p}$ for homological dimension $p$, we map them to a fixed-dimensional vector using learned attention pooling. Each lifetime is first embedded via a per-dimension MLP:
+\[
+    e_i = \mathrm{MLP}^{(p)}_{\mathrm{embed}}(\ell_i) \in \R^{d_v}, \qquad
+    \alpha_i = \mathrm{MLP}^{(p)}_{\mathrm{attn}}(\ell_i) \in \R,
+\]
+where $\mathrm{MLP}^{(p)}_{\mathrm{embed}}: \R \to \R^{d_v}$ and $\mathrm{MLP}^{(p)}_{\mathrm{attn}}: \R \to \R$ are two-layer networks (Linear--ReLU--Linear) with hidden dimension $d_v$, specific to homological dimension $p$. The graph-level topological vector for dimension $p$ is then
+\[
+    T^{(p)}_{\mathrm{graph}} = \sum_{i=1}^{N_p} w_i \, e_i, \qquad
+    w_i = \frac{\exp(\alpha_i)}{\sum_{j=1}^{N_p} \exp(\alpha_j)}.
+\]
+This is a permutation-invariant set function (the sum is over an unordered set of persistence pairs), so $T^{(p)}_{\mathrm{graph}}$ is invariant under relabelling of vertices, as required by Proposition~\ref{prop:invariance}. When $N_p = 0$ (no persistence pairs in dimension $p$), we set $T^{(p)}_{\mathrm{graph}} = \mathbf{0} \in \R^{d_v}$, which is trivially invariant. The full graph-level topological vector is the concatenation $T_{\mathrm{graph}} = [T^{(0)}_{\mathrm{graph}} \;\Vert\; T^{(1)}_{\mathrm{graph}} \;\Vert\; \cdots]$. Since the concatenation of invariant vectors is invariant (the concatenation map is independent of the permutation), $T_{\mathrm{graph}}$ is itself permutation-invariant.
+
+
+\subsection{Node-level topological features}
+\label{sec:node_features}
+
+A key deviation from the idealised architecture of Section~\ref{sec:architecture} is the introduction of \emph{node-level} topological features. In the idealised version, the topological vector $T^{(\ell)}$ is a global (graph-level) quantity that is broadcast identically to all pairs. This suffices for the expressivity results (Theorems~\ref{thm:kwl_lower} and~\ref{thm:strict_gain}), but discards spatial information about \emph{where} topological features are located within the graph.
+
+For each persistence pair $(\sigma_b, \sigma_d)$, we define its \emph{involved nodes} as the set of vertices
+\[
+    \mathcal{N}_i = \mathrm{Vertices}(\sigma_b) \cup \mathrm{Vertices}(\sigma_d).
+\]
+A node-level topological feature vector is then computed for each vertex $u \in V$ by masked attention pooling over the persistence pairs that involve $u$:
+\[
+    t_u^{(p)} = \sum_{i : u \in \mathcal{N}_i} w_{iu}\, e_i, \qquad
+    w_{iu} = \frac{\exp(\alpha_i)}{\sum_{j : u \in \mathcal{N}_j} \exp(\alpha_j)},
+\]
+where $e_i$ and $\alpha_i$ are the \emph{same} embeddings and attention logits used for the graph-level pooling. This parameter sharing ensures that the node-level features are consistent with the graph-level features and avoids introducing additional parameters.
+
+\begin{remark}[Equivariance of node-level features]
+The node-level feature $t_u$ depends on the set of persistence pairs involving $u$, and on the embeddings $e_i$ (which depend on the filtration values of the birth/death simplices of pair $i$). For a permutation $g \in S_n$, the pair involving $g(u)$ in the permuted graph has the same birth/death filtration values (by Lemma~\ref{lem:filt_equiv}) and involves $g(u)$ exactly when the original pair involves $u$. Hence $t_{g(u)}^{g \cdot G} = t_u^G$, and the node-level features are equivariant, \emph{provided} the involved-nodes set $\mathcal{N}_i$ is itself equivariant. See Section~\ref{sec:tie_merging} for a subtlety in ensuring this.
+\end{remark}
+
+
+\subsection{Tie-merging for equivariant node attribution}
+\label{sec:tie_merging}
+
+A critical implementation detail is required to ensure that the node-level topological features are truly permutation-equivariant. The issue arises from a mismatch between the continuous (filtration) and discrete (pairing) parts of the computation.
+
+\paragraph{The problem.}
+When two simplices $\sigma, \sigma'$ of the same dimension have equal filtration values $\tilde{f}(\sigma) = \tilde{f}(\sigma')$, \textsc{gudhi} must break the tie to determine which simplex participates in a persistence pair. It does so by \emph{lexicographic order on vertex labels}: the simplex whose sorted vertex tuple is lexicographically smaller is inserted first. This tie-breaking is deterministic but \emph{not} isomorphism-invariant---relabelling the vertices changes the lexicographic order and can change which simplex appears as the birth or death representative in a pair.
+
+\begin{example}
+Consider edges $(0,1)$ and $(2,3)$ with equal filtration value $0.37$. In the original labelling, \textsc{gudhi} may select $(0,1)$ as the birth representative, giving $\mathcal{N}_i = \{0,1\} \cup \mathrm{Vertices}(\sigma_d)$. Under the permutation $g = (0\;2)(1\;3)$, the edges become $(2,3)$ and $(0,1)$, and \textsc{gudhi} selects $(0,1)$---which is the image of $(2,3)$ under $g$, \emph{not} the image of $(0,1)$. Thus $\mathcal{N}_i$ changes, breaking equivariance.
+\end{example}
+
+\paragraph{The solution: tie-merging.}
+We construct a lookup table that maps each pair $(\text{dimension},\, \text{filtration value})$ to the set of \emph{all} vertices appearing in simplices with that dimension and value:
+\[
+    V_{d,a} = \bigcup_{\substack{\sigma \in K(G) \\ \dim(\sigma) = d,\; \tilde{f}(\sigma) = a}} \mathrm{Vertices}(\sigma).
+\]
+For a finite persistence pair $(\sigma_b, \sigma_d)$ with $\dim(\sigma_b) = d_b$, $\tilde{f}(\sigma_b) = a_b$, $\dim(\sigma_d) = d_d$, $\tilde{f}(\sigma_d) = a_d$, we define
+\[
+    \mathcal{N}_i = V_{d_b, a_b} \cup V_{d_d, a_d}.
+\]
+
+\begin{proposition}[Equivariance of tie-merged node attribution]
+\label{prop:tie_merge}
+The tie-merged involved-node set $\mathcal{N}_i$ is equivariant: for any permutation $g \in S_n$, the persistence pair in $g \cdot G$ corresponding to pair $i$ in $G$ has involved-node set $g(\mathcal{N}_i)$.
+\end{proposition}
+
+\begin{proof}
+The sets $V_{d,a}$ are determined by the \emph{set} of simplices of dimension $d$ with filtration value $a$. Under a permutation $g$, each such simplex $\sigma$ maps to $g \cdot \sigma$, which has the same dimension and the same filtration value (by Lemma~\ref{lem:filt_equiv}). Therefore
+\[
+    V^{g \cdot G}_{d,a}
+    = \bigcup_{\substack{\sigma' \in K(g \cdot G) \\ \dim(\sigma') = d,\; \tilde{f}^{g\cdot G}(\sigma') = a}}
+      \mathrm{Vertices}(\sigma')
+    = \bigcup_{\substack{\sigma \in K(G) \\ \dim(\sigma) = d,\; \tilde{f}(\sigma) = a}}
+      \{g(v) : v \in \sigma\}
+    = g(V^G_{d,a}).
+\]
+The persistence pair in $g \cdot G$ corresponding to pair $i$ in $G$ has the same birth/death filtration values and dimensions (since the persistence diagram is invariant), so
+\[
+    \mathcal{N}_i^{g \cdot G} = V^{g \cdot G}_{d_b, a_b} \cup V^{g \cdot G}_{d_d, a_d}
+    = g(V^G_{d_b, a_b}) \cup g(V^G_{d_d, a_d})
+    = g(\mathcal{N}_i^G). \qedhere
+\]
+\end{proof}
+
+\begin{remark}[Practical impact]
+In practice, filtration values are computed by a learned MLP and are generically distinct (since the set of parameters producing ties has Lebesgue measure zero). After a few training steps, ties are extremely rare and the merged sets $V_{d,a}$ are almost always singletons, so tie-merging has essentially no effect on the learned representation. However, ties \emph{do} occur: (i) at initialisation, when MLP weights are near zero; (ii) on graphs without node labels (e.g., social network datasets such as IMDB-BINARY and COLLAB), where structurally equivalent vertices receive identical features and thus identical filtration values. In these cases, tie-merging is necessary for correctness and does not sacrifice useful information---if the filtration cannot distinguish two simplices, their node attributions are genuinely ambiguous, and the symmetric (merged) answer is the honest one.
+
+In our implementation, filtration values are compared after rounding to $6$ decimal places to account for floating-point arithmetic. This is sufficient for \texttt{float32} precision (which has $\sim$7 significant digits).
+\end{remark}
+
+
+\subsection{Feature fusion}
+\label{sec:fusion}
+
+The fusion step differs from the idealised architecture in two ways: (i) we incorporate node-level features, and (ii) we use a gated residual connection rather than a plain concatenation-MLP.
+
+The full per-pair topological input is
+\[
+    T_{uv} = \big[\, T_{\mathrm{graph}} \;\Vert\; t_u \;\Vert\; t_v \,\big] \in \R^{3 d_T},
+\]
+where $T_{\mathrm{graph}}$ is the graph-level vector (broadcast to all pairs), $t_u$ and $t_v$ are node-level vectors (see Section~\ref{sec:node_features}), and $d_T = (\text{max\_ph\_dim} + 1) \times d_v$ is the topological feature dimension. Both $T_{\mathrm{graph}}$ and $t_u, t_v$ are passed through LayerNorm before concatenation. LayerNorm normalises across the feature (channel) dimension at each spatial position independently; it does not aggregate across positions $(u,v)$ and therefore commutes with any permutation of vertex indices.
+
+\begin{remark}[Asymmetry of $T_{uv}$]
+\label{rmk:asymmetry}
+The ordering $[T_{\mathrm{graph}} \| t_u \| t_v]$ means that in general $T_{uv} \neq T_{vu}$, so the fusion breaks the symmetry $X_{uv} = X_{vu}$ that the idealised architecture preserves. This is intentional: the 2nd-order equivariant basis of \cite{maron2019provably} is defined for \emph{general} (not necessarily symmetric) order-$2$ tensors, so the subsequent equivariant layers and the final invariant readout (which sums the diagonal) handle non-symmetric inputs correctly. The enlarged tensor space does not reduce expressive power---it strictly contains the symmetric subspace---so the expressivity results of Section~\ref{sec:architecture} are unaffected.
+\end{remark}
+
+The update rule is
+\[
+    X^{(\ell+1)}_{uv}
+    = X^{(\ell+\frac{1}{2})}_{uv}
+    + \underbrace{\sigma\!\big(\gamma_\ell(X^{(\ell+\frac{1}{2})}_{uv} \| T_{uv})\big)}_{\text{gate}}
+    \odot \underbrace{\psi_\ell\!\big(X^{(\ell+\frac{1}{2})}_{uv} \| T_{uv}\big)}_{\text{update}},
+\]
+where $\gamma_\ell$ and $\psi_\ell$ are pointwise $1 \times 1$ convolutions (applied identically at each spatial position $(u,v)$), $\sigma$ is the sigmoid function, and $\odot$ is element-wise multiplication. The gate $\gamma_\ell$ is initialised with small weights and bias $2.0$ (so that $\sigma(2) \approx 0.88$), and the last layer of $\psi_\ell$ is initialised with $\mathcal{N}(0, 0.01^2)$ weights and zero bias. This ensures that the residual starts near the identity mapping ($X^{(\ell+1)} \approx X^{(\ell+\frac{1}{2})}$) while still allowing gradient flow to the topology branch from the first training step.
+
+\begin{lemma}[Equivariance of the fusion]
+\label{lem:fusion_equiv}
+The gated residual fusion preserves permutation equivariance.
+\end{lemma}
+
+\begin{proof}
+Under a permutation $g \in S_n$, we have:
+\begin{itemize}
+    \item $X^{(\ell+\frac{1}{2})}$ is equivariant by assumption (it is the output of the equivariant block).
+    \item $T_{\mathrm{graph}}$ is invariant (Proposition~\ref{prop:invariance}), so it is identical at positions $(u,v)$ and $(g(u),g(v))$.
+    \item $t_u$ is equivariant (Proposition~\ref{prop:tie_merge}): $t_{g(u)}^{g \cdot G} = t_u^G$.
+    \item LayerNorm normalises across the feature dimension at each position independently, so it commutes with the permutation of spatial indices.
+    \item The concatenation $[X^{(\ell+\frac{1}{2})}_{uv} \| T_{\mathrm{graph}} \| t_u \| t_v]$ therefore transforms equivariantly: its value at $(g(u),g(v))$ in $g \cdot G$ equals its value at $(u,v)$ in $G$.
+    \item $\gamma_\ell$ and $\psi_\ell$ are pointwise ($1 \times 1$ convolutions), so they commute with permutations.
+    \item The gate, update, element-wise product, and residual sum are all pointwise operations that preserve equivariance. \qedhere
+\end{itemize}
+\end{proof}
+
+\begin{remark}[Expressivity preservation]
+The gated residual formulation does not reduce expressive power compared to the idealised architecture. The gate can learn to pass through the topological signal ($\sigma(\gamma) \to 1$) or suppress it ($\sigma(\gamma) \to 0$). In the latter case, $X^{(\ell+1)} = X^{(\ell+\frac{1}{2})}$, recovering the pure equivariant update. Hence the hypothesis class of the gated residual model contains the hypothesis class of the pure equivariant model, preserving the lower bound of Theorem~\ref{thm:kwl_lower}. Furthermore, any fusion of the form $\psi(X \| T)$ can be realised by setting the gate to $1$ and choosing $\psi$ appropriately, so Theorem~\ref{thm:strict_gain} also carries over.
+\end{remark}
+
+\subsection{Summary of design choices}
+
+Table~\ref{tab:v3_summary} summarises the key implementation choices and their relationship to the idealised architecture.
+
+\begin{table}[h]
+\centering
+\caption{Implementation choices in our base architecture.}
+\label{tab:v3_summary}
+\begin{tabular}{lll}
+\toprule
+\textbf{Component} & \textbf{Idealised (Sec.~\ref{sec:architecture})} & \textbf{Implementation} \\
+\midrule
+Filtration input & $X^{(\ell)}$ (current layer) & $X^{(\ell)}_{\mathrm{pre}}$ (pre-equivariant) \\
+Vectorisation input & Full persistence diagram & Lifetime only ($\ell_i \in \R$) \\
+Vectorisation method & Generic $\Phi_{\mathrm{PH}}$ & Learned attention pooling \\
+Essential features & Included & Discarded \\
+Node attribution & Not specified & Masked attention + tie-merging \\
+Fusion & Concatenation + MLP & Gated residual + LayerNorm \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+None of these deviations affect the proofs of Theorems~\ref{thm:kwl_lower} and~\ref{thm:strict_gain}. Theorem~\ref{thm:kwl_lower} requires only that the equivariant branch can be recovered by zeroing out the topology contribution, which is guaranteed by the gated residual (setting the gate to zero). Theorem~\ref{thm:strict_gain} requires only that the topological vectorisation can distinguish the persistence diagrams of the witness pair, which holds for the attention-pooling vectorisation by universality of the learned embedding (on finite persistence diagrams with distinct lifetimes, any injective function $\R \to \R^{d_v}$ composed with weighted summation can separate distinct multisets, by the theory of DeepSets~\cite{zaheer2017deep}).
+
+\subsection{End-to-end equivariance}
+
+We now consolidate the component-wise arguments into a single statement.
+
+\begin{proposition}[End-to-end invariance]
+\label{prop:end_to_end}
+Let $\Phi$ denote the full model mapping $(A, X_0) \mapsto y \in \R^c$. For any permutation $g \in S_n$,
+\[
+    \Phi(g \cdot A,\, g \cdot X_0) = \Phi(A, X_0).
+\]
+\end{proposition}
+
+\begin{proof}
+We argue by induction on layers.
+
+\emph{Base case ($\ell = 0$).} The input tensor $X^{(0)}$ encodes the adjacency on channel~$0$ and node labels on the diagonal, both of which transform equivariantly under $A \mapsto P A P^\top$. Hence $X^{(0)}$ is a $2$nd-order equivariant tensor.
+
+\emph{Inductive step.} Suppose $X^{(\ell)}$ is equivariant. Then:
+\begin{enumerate}
+    \item $X^{(\ell)}_{\mathrm{pre}} = X^{(\ell)}$ is equivariant (assumption).
+    \item $X^{(\ell+\frac{1}{2})} = \mathrm{EqvLayer}_\ell(X^{(\ell)})$ is equivariant (\texttt{RegularBlock} is equivariant by construction~\cite{maron2019provably}).
+    \item The filtration $\tilde{f}$ computed from $X^{(\ell)}_{\mathrm{pre}}$ is equivariant (Lemma~\ref{lem:filt_equiv}, Section~\ref{sec:diff_ph}).
+    \item The persistence diagram is invariant (Proposition~\ref{prop:invariance}).
+    \item $T_{\mathrm{graph}}$ is invariant (Section~4.5; concatenation of invariant vectors across homological dimensions).
+    \item Node-level features $t_u$ are equivariant (Proposition~\ref{prop:tie_merge}).
+    \item LayerNorm acts pointwise on the feature dimension, commuting with spatial permutations.
+    \item The concatenation $T_{uv} = [T_{\mathrm{graph}} \| t_u \| t_v]$ is equivariant (Remark~\ref{rmk:asymmetry}; the asymmetry is handled by the general order-$2$ equivariant basis).
+    \item The gated residual fusion produces equivariant $X^{(\ell+1)}$ (Lemma~\ref{lem:fusion_equiv}).
+\end{enumerate}
+
+\emph{Readout.} The final invariant readout sums the diagonal of the last equivariant tensor and passes the result through an MLP. The diagonal sum is a $2$nd-order invariant map (basis element $b_1$ of~\cite{maron2019provably}), and the MLP is a pointwise (permutation-independent) function. Their composition is invariant, giving $\Phi(g \cdot A, g \cdot X_0) = \Phi(A, X_0)$.
+\end{proof}
+
+
+\subsection{Strict separation beyond 2-WL}
+
+We now verify that the expressivity results of Section~\ref{sec:architecture}---in particular, the strict gain over $2$-WL---survive every implementation deviation identified above.
+
+\begin{corollary}[The implementation is strictly more expressive than $2$-WL]
+\label{cor:impl_strict}
+There exist non-isomorphic graphs $G, G'$ that are indistinguishable by $2$-WL (and hence by any standard message-passing GNN) but are distinguished by the implemented model $\Phi$.
+\end{corollary}
+
+\begin{proof}
+We verify that the two ingredients of the expressivity argument---the \emph{lower bound} (Theorem~\ref{thm:kwl_lower}) and the \emph{strict gain} (Theorem~\ref{thm:strict_gain})---hold for the implemented model.
+
+\paragraph{Lower bound.}
+Theorem~\ref{thm:kwl_lower} requires that the model can simulate the pure equivariant backbone by ignoring the topology branch. In the gated residual fusion, setting the gate bias to $-\infty$ gives $\sigma(\gamma) \to 0$, so $X^{(\ell+1)} = X^{(\ell+\frac{1}{2})}$ and the topology branch contributes nothing. The remaining computation is exactly the \texttt{RegularBlock} stack of~\cite{maron2019provably}, which is at least as expressive as $2$-WL. None of the deviations---node-level features, LayerNorm, asymmetric $T_{uv}$, tie-merging---affect this argument, since they are all multiplied by the zero gate.
+
+\paragraph{Strict gain.}
+Theorem~\ref{thm:strict_gain} exhibits a witness pair (the Rook graph $K_4 \times K_4$ and the Shrikhande graph) that are $2$-WL equivalent but have \emph{distinct} persistence diagrams under any vertex-count filtration. The strict gain requires two conditions:
+
+\begin{enumerate}
+    \item \emph{The filtration can realise the witness filtration.} The learned filtration MLP $\rho$ maps from $\R^d \to \R$ via a two-layer network with ReLU activations. Since the witness pair has distinct adjacency structure, the pairwise feature tensors $X^{(0)}$ differ, and $\rho$ can be chosen to produce the vertex-count filtration (or any filtration that separates the persistence diagrams). The pre-equivariant input, non-decreasing correction, and clique complex construction do not constrain the achievable filtration values---they only ensure validity.
+
+    \item \emph{The vectorisation can distinguish the resulting diagrams.} The persistence diagrams of the witness pair differ as multisets of lifetimes: they contain different numbers of bars and/or bars of different lengths~\cite{hofer2023expressivity}. The attention-pooling vectorisation computes
+    \[
+        T^{(p)}_{\mathrm{graph}} = \sum_i w_i \, e_i, \qquad e_i = \mathrm{MLP}(\ell_i), \quad w_i = \mathrm{softmax}(\mathrm{MLP}(\ell_i)),
+    \]
+    which is a continuous, permutation-invariant set function. By the universality theorem for DeepSets~\cite{zaheer2017deep}, for any two distinct finite multisets $S \neq S'$ over a compact domain, there exist continuous functions $\phi, \rho$ such that $\sum_{s \in S} \phi(s) \neq \sum_{s' \in S'} \phi(s')$. Our embedding and attention MLPs can realise such $\phi$ and $\rho$ (with the softmax weighting providing the necessary flexibility), so $T^{(p)}_{\mathrm{graph}}(G) \neq T^{(p)}_{\mathrm{graph}}(G')$ for at least one homological dimension $p$.
+\end{enumerate}
+
+Since $T_{\mathrm{graph}}$ differs between $G$ and $G'$, and $T_{\mathrm{graph}}$ feeds into the fusion (which can pass it through via the gate), the final readout $\Phi(G) \neq \Phi(G')$.
+
+\paragraph{Implementation deviations only add information.}
+Every deviation from the idealised architecture either (a) preserves the same information (pre-equivariant input, non-decreasing correction, attention pooling), (b) adds strictly more information (node-level features, birth--persistence coordinates in variants v4/v5, essential features in v5), or (c) is a structural choice that does not collapse distinctions (gated residual, LayerNorm, asymmetric $T_{uv}$, tie-merging). In particular:
+\begin{itemize}
+    \item \textbf{Discarding essentials} (base variant): The witness separation relies on \emph{finite} persistence pairs, so discarding essentials does not affect it.
+    \item \textbf{Tie-merging}: At the witness filtration, the Rook and Shrikhande graphs produce persistence pairs with generically distinct filtration values (since the filtration is learned and the graphs have different combinatorial structure). Ties occur with probability zero under generic parameters, so tie-merging does not merge any pairs and the separation is preserved.
+    \item \textbf{Node-level features and asymmetric $T_{uv}$}: These provide \emph{additional} spatial information beyond the graph-level vector. They can only help distinguish graphs, never collapse a distinction that the graph-level signal makes.
+    \item \textbf{LayerNorm}: Applied per-position on the feature dimension, LayerNorm is an invertible affine transformation (for fixed running statistics) and therefore does not collapse distinct inputs.
+\end{itemize}
+
+Hence the implemented model distinguishes the witness pair, and is strictly more expressive than $2$-WL.
+\end{proof}
+
+
+% =================================================================
+% Section: Richer Topological Representations
+% =================================================================
+
+\section{Richer Topological Representations}
+\label{sec:extensions}
+
+The base architecture of Section~\ref{sec:implementation} deliberately uses a minimal topological representation---scalar lifetimes, no essential features---to prioritise computational efficiency and simplicity. In this section, we describe two progressively richer variants that exploit more of the information in the persistence diagram. All variants share the same filtration, simplicial complex construction, gated residual fusion, and tie-merging mechanism; they differ only in what information is extracted from each persistence pair and how it is embedded.
+
+
+\subsection{Birth--persistence embedding}
+\label{sec:v4}
+
+The base architecture discards the birth time of each persistence pair, embedding only the lifetime $\ell_i = \tilde{f}(\sigma_d) - \tilde{f}(\sigma_b)$. However, the \emph{position} of a pair in the birth--persistence plane carries task-relevant information: two pairs with the same lifetime but different birth times correspond to topological features that appear at different scales of the filtration.
+
+This observation is central to the Weighted Kernel for Persistence Images (WKPI) framework of \cite{zhao2019learning}, which learns a weighted kernel over the birth--persistence plane to optimise graph classification. WKPI demonstrates that the two-dimensional birth--persistence representation captures structure invisible to lifetime alone, and that the optimal weighting is task-dependent---motivating a learned embedding.
+
+We accordingly replace the scalar lifetime input with the two-dimensional vector
+\[
+    \mathbf{p}_i = (\tilde{f}(\sigma_b),\; \ell_i) \in \R^2,
+\]
+and modify the embedding and attention networks to accept $\R^2$ inputs:
+\[
+    e_i = \mathrm{MLP}^{(p)}_{\mathrm{embed}}(\mathbf{p}_i) \in \R^{d_v}, \qquad
+    \alpha_i = \mathrm{MLP}^{(p)}_{\mathrm{attn}}(\mathbf{p}_i) \in \R.
+\]
+To stabilise training and ensure that the attention weights are well-conditioned, we apply per-graph, per-dimension normalisation to the birth--persistence vectors before embedding:
+\[
+    \hat{\mathbf{p}}_i = \frac{\mathbf{p}_i - \bar{\mathbf{p}}}{\mathrm{std}(\mathbf{p}) + \varepsilon},
+\]
+where $\bar{\mathbf{p}}$ and $\mathrm{std}(\mathbf{p})$ are the component-wise mean and population standard deviation over all pairs in the current graph and dimension, and $\varepsilon = 10^{-8}$. We use the population standard deviation ($N$ in the denominator rather than $N-1$) to avoid division by zero when there is only a single persistence pair in a dimension. This normalisation is a permutation-invariant operation (it computes statistics over an unordered set), so it does not affect equivariance.
+
+\begin{remark}[Equivariance preservation]
+The two-dimensional input $\mathbf{p}_i = (\tilde{f}(\sigma_b), \tilde{f}(\sigma_d) - \tilde{f}(\sigma_b))$ depends only on the filtration values of the birth and death simplices, which are permutation-invariant by Lemma~\ref{lem:filt_equiv}. The normalisation statistics $\bar{\mathbf{p}}$ and $\mathrm{std}(\mathbf{p})$ are symmetric functions of the set $\{\mathbf{p}_i\}$, hence invariant. All subsequent operations (MLP, softmax, weighted sum, masked pooling) are identical to the base architecture. Therefore, all invariance and equivariance properties---including Proposition~\ref{prop:tie_merge} for node-level features---are preserved.
+\end{remark}
+
+Infinite persistence pairs are still discarded in this variant.
+
+
+\subsection{Essential features with learned scaling}
+\label{sec:v5}
+
+The final variant additionally incorporates essential (infinite persistence) features---persistence pairs $(\sigma_b, \emptyset)$ where the homological class is born but never dies within the filtration. These features carry important structural information: in $H_0$, the number of essential classes equals the number of connected components; in $H_1$, essential classes correspond to independent cycles that persist through the entire filtration range.
+
+\paragraph{Clipping and scaling.}
+Since essential features have infinite persistence, a finite proxy is needed. We clip the persistence at the maximum filtration value and apply a learned per-dimension scaling:
+\[
+    \ell_i^{\mathrm{ess}} = |\lambda_p| \cdot \max\!\big(\tilde{f}_{\max} - \tilde{f}(\sigma_b),\; 0\big),
+\]
+where $\tilde{f}_{\max} = \max_{\sigma \in K(G)} \tilde{f}(\sigma)$ is the maximum corrected filtration value and $\lambda_p \in \R$ is a learnable parameter specific to homological dimension $p$, initialised to $1$. The absolute value ensures non-negative scaling regardless of the sign of $\lambda_p$. Note that $\tilde{f}_{\max}$ is the maximum of the set $\{\tilde{f}(\sigma)\}_{\sigma \in K(G)}$; since each $\tilde{f}(\sigma)$ is permutation-invariant (Lemma~\ref{lem:filt_equiv}) and $\max$ is a symmetric function, $\tilde{f}_{\max}$ is itself permutation-invariant. The learnable scalar $\lambda_p$ is a graph-independent parameter, so $|\lambda_p| \cdot (\tilde{f}_{\max} - \tilde{f}(\sigma_b))$ is invariant.
+
+The birth--persistence vector for essential features is then
+\[
+    \mathbf{p}_i^{\mathrm{ess}} = \big(\tilde{f}(\sigma_b),\; \ell_i^{\mathrm{ess}}\big) \in \R^2,
+\]
+and it is processed by the same embedding and attention networks as finite features.
+
+\paragraph{Node attribution for essential features.}
+The representative birth simplex $\sigma_b$ chosen by \textsc{gudhi} for an essential pair is labelling-dependent (it depends on the order in which tied simplices are processed). Unlike finite pairs, where tie-merging resolves this ambiguity by grouping simplices with equal filtration values, essential features present a more fundamental challenge: they represent \emph{global} topological invariants (e.g., the connected component containing a specific vertex, or a non-contractible cycle spanning the entire graph). Attributing such a feature to the vertices of a single birth simplex is inherently arbitrary.
+
+We therefore assign essential features to \emph{all} vertices in the graph:
+\[
+    \mathcal{N}_i^{\mathrm{ess}} = V.
+\]
+
+\begin{proposition}[Equivariance of essential node attribution]
+\label{prop:ess_equiv}
+The all-vertices attribution $\mathcal{N}_i^{\mathrm{ess}} = V$ is permutation-equivariant: for any $g \in S_n$, $g(\mathcal{N}_i^{\mathrm{ess}}) = g(V) = V = \mathcal{N}_i^{\mathrm{ess}}$.
+\end{proposition}
+
+\begin{proof}
+The vertex set $V$ is invariant under any permutation $g \in S_n$ (as a set, $g(V) = V$). Hence the involved-node set is trivially equivariant.
+\end{proof}
+
+This is the coarsest possible node attribution---every vertex receives equal credit for every essential feature. While this sacrifices spatial specificity for essential features, it is the unique equivariant choice that does not depend on the labelling-dependent representative chosen by \textsc{gudhi}. The spatial information for essential features enters indirectly through the birth filtration value $\tilde{f}(\sigma_b)$, which is determined by the pre-equivariant features and is equivariant by construction.
+
+
+\subsection{Summary of variants}
+
+Table~\ref{tab:variants} compares the three architecture variants.
+
+\begin{table}[h]
+\centering
+\caption{Comparison of topological representation variants. All variants share the same equivariant backbone, filtration, simplicial complex, tie-merging, and gated residual fusion.}
+\label{tab:variants}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Feature} & \textbf{Base (Sec.~\ref{sec:implementation})} & \textbf{Birth--Pers.\ (Sec.~\ref{sec:v4})} & \textbf{Essential (Sec.~\ref{sec:v5})} \\
+\midrule
+Embedding input & $\ell_i \in \R$ & $(\tilde{f}(\sigma_b), \ell_i) \in \R^2$ & $(\tilde{f}(\sigma_b), \ell_i) \in \R^2$ \\
+Essential features & Discarded & Discarded & Included (learned $\lambda_p$) \\
+Input normalisation & None & Per-graph BP norm & Per-graph BP norm \\
+Node attribution (finite) & Tie-merged & Tie-merged & Tie-merged \\
+Node attribution (essential) & N/A & N/A & All vertices \\
+Parameters per dim & $O(d_v^2)$ & $O(d_v^2)$ & $O(d_v^2) + 1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each successive variant increases the information extracted from the persistence diagram at the cost of additional computation. The base variant is the most efficient and is suitable for deployment on large graphs or resource-constrained settings. The birth--persistence variant adds two-dimensional structure at minimal parameter cost (the only change is the input dimension of two MLPs from $1$ to $2$). The essential variant additionally captures infinite persistence features at the cost of processing more pairs per graph and one extra learnable scalar per homological dimension.
+
+
+\subsection{Equivariance and expressivity of the variants}
+
+We now verify that both extended variants preserve the end-to-end invariance (Proposition~\ref{prop:end_to_end}) and the strict separation beyond $2$-WL (Corollary~\ref{cor:impl_strict}).
+
+\begin{proposition}[Invariance of the birth--persistence variant]
+\label{prop:v4_invariance}
+The birth--persistence variant (Section~\ref{sec:v4}) satisfies $\Phi(g \cdot A, g \cdot X_0) = \Phi(A, X_0)$ for all $g \in S_n$.
+\end{proposition}
+
+\begin{proof}
+The proof of Proposition~\ref{prop:end_to_end} carries through with two modifications to the inductive step:
+
+\emph{(i) Two-dimensional embedding input.}
+The base proof relies on the lifetime $\ell_i$ being invariant. In the birth--persistence variant, the input is $\mathbf{p}_i = (\tilde{f}(\sigma_b), \ell_i) \in \R^2$. The birth value $\tilde{f}(\sigma_b)$ is a corrected filtration value of a simplex, which is invariant by Lemma~\ref{lem:filt_equiv}. The lifetime $\ell_i = \tilde{f}(\sigma_d) - \tilde{f}(\sigma_b)$ is the difference of two invariant quantities, hence invariant. Therefore $\mathbf{p}_i$ is invariant, and the embeddings $e_i = \mathrm{MLP}(\mathbf{p}_i)$ and logits $\alpha_i = \mathrm{MLP}(\mathbf{p}_i)$ remain invariant (MLPs are deterministic functions of their input).
+
+\emph{(ii) Birth--persistence normalisation.}
+The normalised input $\hat{\mathbf{p}}_i = (\mathbf{p}_i - \bar{\mathbf{p}}) / (\mathrm{std}(\mathbf{p}) + \varepsilon)$ introduces the mean $\bar{\mathbf{p}}$ and population standard deviation $\mathrm{std}(\mathbf{p})$, both computed over the multiset $\{\mathbf{p}_i\}$ for the current graph and homological dimension. Under a permutation $g$, the multiset of birth--persistence vectors is unchanged (since each $\mathbf{p}_i$ is invariant and the persistence diagram as a multiset is invariant by Proposition~\ref{prop:invariance}). Therefore $\bar{\mathbf{p}}$ and $\mathrm{std}(\mathbf{p})$ are invariant, $\hat{\mathbf{p}}_i$ is invariant, and the downstream computation (attention pooling, node-level features, tie-merging, gated fusion) proceeds exactly as in the base case.
+
+All other components---filtration, simplicial complex, non-decreasing correction, tie-merging, LayerNorm, gated residual fusion, readout---are shared with the base architecture and their equivariance/invariance is established in Proposition~\ref{prop:end_to_end}.
+\end{proof}
+
+\begin{proposition}[Invariance of the essential-features variant]
+\label{prop:v5_invariance}
+The essential-features variant (Section~\ref{sec:v5}) satisfies $\Phi(g \cdot A, g \cdot X_0) = \Phi(A, X_0)$ for all $g \in S_n$.
+\end{proposition}
+
+\begin{proof}
+The essential-features variant inherits all of the birth--persistence variant's structure (Proposition~\ref{prop:v4_invariance}) and adds two new components:
+
+\emph{(i) Essential persistence proxy.}
+For an essential pair $(\sigma_b, \emptyset)$, the clipped persistence is $\ell_i^{\mathrm{ess}} = |\lambda_p| \cdot \max(\tilde{f}_{\max} - \tilde{f}(\sigma_b), 0)$. Both $\tilde{f}_{\max}$ (maximum of the invariant set $\{\tilde{f}(\sigma)\}$, hence invariant) and $\tilde{f}(\sigma_b)$ (invariant by Lemma~\ref{lem:filt_equiv}) are permutation-invariant, and $\lambda_p$ is a graph-independent learnable scalar. Therefore $\ell_i^{\mathrm{ess}}$ and the essential birth--persistence vector $\mathbf{p}_i^{\mathrm{ess}} = (\tilde{f}(\sigma_b), \ell_i^{\mathrm{ess}})$ are invariant. They are processed by the same embedding and attention MLPs as finite pairs, so the graph-level pooling over the combined set of finite and essential pairs remains invariant.
+
+\emph{(ii) All-vertices node attribution.}
+Essential features are attributed to $\mathcal{N}_i^{\mathrm{ess}} = V$. By Proposition~\ref{prop:ess_equiv}, $g(V) = V$, so the node-level masked pooling for essential pairs is equivariant. Combined with the tie-merged attribution for finite pairs (Proposition~\ref{prop:tie_merge}), the full node-level feature vector $t_u$ is equivariant.
+
+The remainder of the computation (BP normalisation, LayerNorm, gated fusion, readout) is identical to the birth--persistence variant.
+\end{proof}
+
+We now establish that both variants remain strictly more expressive than $2$-WL.
+
+\begin{corollary}[Both variants are strictly more expressive than $2$-WL]
+\label{cor:variants_strict}
+The birth--persistence variant and the essential-features variant each distinguish the Rook--Shrikhande witness pair, and are therefore strictly more expressive than $2$-WL.
+\end{corollary}
+
+\begin{proof}
+Both variants share the same filtration, simplicial complex, and gated residual fusion as the base architecture. The lower-bound argument (gate $\to 0$ recovers the pure equivariant backbone $\geq 2$-WL) is identical to Corollary~\ref{cor:impl_strict} and is independent of the vectorisation.
+
+For the strict gain, we verify that the additional components in each variant do not collapse the witness separation established for the base architecture:
+
+\paragraph{Birth--persistence variant.}
+The base architecture separates the witness pair via distinct multisets of lifetimes $\{\ell_i\}$. The birth--persistence variant embeds the strictly richer multisets $\{(\tilde{f}(\sigma_b), \ell_i)\}$. Since the lifetimes already differ between $G$ and $G'$, the two-dimensional multisets also differ (the projection onto the second coordinate recovers the original lifetime multiset). The BP normalisation is a per-graph affine transformation: it maps each graph's multiset to a standardised version, but because the \emph{un-normalised} multisets differ, the standardised multisets also differ generically.\footnote{The only degenerate case would be if normalisation mapped two distinct multisets to the same standardised multiset. This requires the two raw multisets to differ only by a global shift and scale---a measure-zero condition for learned filtration values on structurally different graphs.} By DeepSets universality~\cite{zaheer2017deep}, the attention-pooling vectorisation can separate any two distinct finite multisets over $\R^2$, so $T_{\mathrm{graph}}(G) \neq T_{\mathrm{graph}}(G')$. The gate can pass through this difference, giving $\Phi(G) \neq \Phi(G')$.
+
+\paragraph{Essential-features variant.}
+This variant processes a \emph{superset} of the information available to the birth--persistence variant: it includes all finite pairs (with the same 2D embedding and BP normalisation) plus additional essential pairs. Since the finite pairs alone suffice to separate the witness pair (by the argument above), adding essential pairs cannot collapse this distinction---the attention-pooling aggregation over the combined set of finite and essential pairs is still a DeepSets-universal set function, and expanding a multiset that already differs between $G$ and $G'$ preserves the difference.
+
+More precisely, let $S_{\mathrm{fin}}(G)$ and $S_{\mathrm{fin}}(G')$ denote the multisets of finite birth--persistence vectors, and $S_{\mathrm{ess}}(G)$, $S_{\mathrm{ess}}(G')$ the essential ones. The full multisets are $S(G) = S_{\mathrm{fin}}(G) \cup S_{\mathrm{ess}}(G)$ and $S(G') = S_{\mathrm{fin}}(G') \cup S_{\mathrm{ess}}(G')$. Since $S_{\mathrm{fin}}(G) \neq S_{\mathrm{fin}}(G')$, we have $S(G) \neq S(G')$ (appending elements to two distinct multisets cannot make them equal unless the appended elements cancel the difference, which would require $S_{\mathrm{ess}}$ to introduce a compensating element---impossible since essential pairs have clipped persistence values in a different range from finite pairs). By universality, the vectorisation separates $S(G)$ from $S(G')$.
+
+The all-vertices node attribution for essential features adds a uniform signal to every node, which does not interfere with the graph-level separation. The tie-merging, LayerNorm, and gated fusion arguments carry over unchanged from Corollary~\ref{cor:impl_strict}.
+\end{proof}
+
+\begin{remark}[Monotonicity of expressivity across variants]
+The three variants form a chain of increasing information:
+\[
+    \{\ell_i\} \;\subset\; \{(\tilde{f}(\sigma_b), \ell_i)\} \;\subset\; \{(\tilde{f}(\sigma_b), \ell_i)\} \cup \{(\tilde{f}(\sigma_b), \ell_i^{\mathrm{ess}})\}.
+\]
+Each successive variant's input is a strict superset of the previous one's. Since the attention-pooling vectorisation is a universal set function, any separation achievable by the smaller input is also achievable by the larger input (by choosing the embedding MLP to ignore the extra coordinates or extra pairs). Therefore the hypothesis classes satisfy
+\[
+    \mathcal{H}_{\mathrm{base}} \subseteq \mathcal{H}_{\mathrm{BP}} \subseteq \mathcal{H}_{\mathrm{ess}},
+\]
+and the strict separation beyond $2$-WL is preserved (and potentially strengthened) at each level.
+\end{remark}
