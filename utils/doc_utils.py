@@ -16,6 +16,7 @@ def write_to_file_doc(train_acc, train_loss, val_acc, val_loss, epoch, config):
     columns = ['experiment_name', 'epoch', 'train_loss', 'train_accuracy', 'val_loss', 'val_accuracy', 'timestamp']
 
     fullpath = os.path.join(config.summary_dir, 'per_epoch_stats.csv')
+    os.makedirs(config.summary_dir, exist_ok=True)
     if os.path.exists(fullpath):
         f = pd.read_csv(fullpath)
     else:
@@ -56,6 +57,7 @@ def create_experiment_results_plot(title, parameter, directory, log=False):
     plt.title(title)
     plt.legend()
     file_name = (os.path.join(directory, (title + parameter + ".png")))
+    os.makedirs(directory, exist_ok=True)
     plt.savefig(file_name)
 
     plt.close()
@@ -91,6 +93,7 @@ def summary_10fold_results(summary_dir):
     mean_row = pd.DataFrame([[best_epoch, best_row['val_loss'], best_row['val_accuracy'], 'mean']], columns=df2.columns)
     df2 = pd.concat([df2, mean_row], ignore_index=True)
     fullpath = os.path.join(summary_dir, 'exp_summary.csv')
+    os.makedirs(summary_dir, exist_ok=True)
     df2.to_csv(fullpath, index=False)
 
 
@@ -111,6 +114,7 @@ def summary_qm9_results(summary_dir, test_dists, test_loss, best_epoch, create_c
     values1 = [test_loss] + test_dists
 
     fullpath = os.path.join(summary_dir, 'exp_summary.csv')
+    os.makedirs(summary_dir, exist_ok=True)
     pd.DataFrame([values1], columns=columns).to_csv(fullpath, index=False)
 
 
@@ -121,6 +125,7 @@ def doc_used_config(config):
     :return:
     """
     fullpath = os.path.join(config.summary_dir, 'used_config.json')
+    os.makedirs(config.summary_dir, exist_ok=True)
 
     with open(fullpath, 'w') as fp:
         json.dump(config, fp)
