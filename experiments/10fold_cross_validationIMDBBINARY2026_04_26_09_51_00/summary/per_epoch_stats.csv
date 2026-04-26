@@ -1,0 +1,2 @@
+experiment_name,epoch,train_loss,train_accuracy,val_loss,val_accuracy,timestamp
+10fold_cross_validation,0,0.7015295184320873,0.47333333333333333,0.6914463853836059,0.53,2026_04_26_09_51_00
