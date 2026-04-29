@@ -19,7 +19,8 @@ from data_loader.data_helper import load_dataset
 
 
 def generate_kfold_splits(dataset_name, k, seed=100):
-    graphs, labels = load_dataset(dataset_name)
+    result = load_dataset(dataset_name)
+    graphs = result[0]
     n = len(graphs)
 
     np.random.seed(seed)
