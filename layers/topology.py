@@ -383,7 +383,7 @@ class TopologyLayer(nn.Module):
         self.gate_conv = nn.Conv2d(fuse_in, eqv_features,
                                    kernel_size=1, bias=True)
         nn.init.normal_(self.gate_conv.weight, std=0.01)
-        nn.init.constant_(self.gate_conv.bias, 2.0)  # sigmoid(2) ≈ 0.88
+        nn.init.constant_(self.gate_conv.bias, 2.0)  # sigmoid(-2) ≈ 0.12 — conservative start
 
     def forward(self, x_eqv, x_filt, simplices_batch):
         """
