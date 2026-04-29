@@ -33,6 +33,7 @@ class BaseModel(nn.Module):
                 topo_stats = getattr(config.architecture, 'topo_num_stats', 4)
                 self.topo_layers.append(
                     TopologyLayer(eqv_features=next_layer_features,
+                                  filt_features=last_layer_features,
                                   hidden_dim=topo_hidden,
                                   max_ph_dim=topo_ph_dim,
                                   num_stats=topo_stats)
@@ -70,12 +71,15 @@ class BaseModel(nn.Module):
 
         for i, block in enumerate(self.reg_blocks):
 
-            # Step 1: equivariant update: X^(l+1/2) = EqvLayer(X^(l))
+            # Step 1: save pre-equivariant features for filtration
+            x_pre = x
+
+            # Step 2: equivariant update: X^(l+1/2) = EqvLayer(X^(l))
             x = block(x)
 
-            # Steps 2-5: topology (filtration on X^(l+1/2) -> PH -> broadcast -> fuse)
+            # Steps 3-6: topology (filtration on x_pre -> PH -> broadcast -> fuse with x)
             if self.use_topology:
-                x = self.topo_layers[i](x, simplices_batch)
+                x = self.topo_layers[i](x, x_pre, simplices_batch)
 
             if self.config.architecture.new_suffix:
                 # use new suffix

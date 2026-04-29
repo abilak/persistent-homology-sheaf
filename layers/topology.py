@@ -343,8 +343,8 @@ class TopologyLayer(nn.Module):
     """
     Full topology branch for one network layer:
 
-        1. Filtration on post-equivariant features:
-           f(sigma) = rho( sum_{(i,j) in P(sigma)} X^(l+1/2)_ij )
+        1. Filtration on pre-equivariant features:
+           f(sigma) = rho( sum_{(i,j) in P(sigma)} X^(l)_ij )
         2. Persistent homology with differentiable vectorization:
            T_graph, {t_i} = Phi_PH(K(G), f)
         3. Broadcast topology to all pairs (graph + node-level):
@@ -355,10 +355,10 @@ class TopologyLayer(nn.Module):
     Node-level features t_i are computed by attention-pooling over
     persistence pairs involving node i (parameter-shared with graph pool).
     """
-    def __init__(self, eqv_features, hidden_dim=64,
+    def __init__(self, eqv_features, filt_features, hidden_dim=64,
                  max_ph_dim=1, num_stats=4):
         super().__init__()
-        self.filtration = LearnedFiltration(eqv_features, hidden_dim)
+        self.filtration = LearnedFiltration(filt_features, hidden_dim)
         self.ph = DifferentiablePH(max_ph_dim, num_stats)
 
         topo_dim = self.ph.out_features
@@ -386,10 +386,11 @@ class TopologyLayer(nn.Module):
         nn.init.normal_(self.gate_conv.weight, std=0.01)
         nn.init.constant_(self.gate_conv.bias, 2.0)  # sigmoid(2) ≈ 0.88
 
-    def forward(self, x_eqv, simplices_batch):
+    def forward(self, x_eqv, x_filt, simplices_batch):
         """
         Args:
             x_eqv:  B x d_eqv x M x M  (post-equivariant features)
+            x_filt: B x d_filt x M x M  (pre-equivariant features)
             simplices_batch: list of B simplex dicts
 
         Returns:
@@ -397,8 +398,8 @@ class TopologyLayer(nn.Module):
         """
         B, d, M, _ = x_eqv.shape
 
-        # Steps 1-2: filtration on X^(l+1/2) → PH → graph + node vectors
-        filt_batch = self.filtration(x_eqv, simplices_batch)
+        # Steps 1-2: filtration on pre-equivariant X^(l) → PH → graph + node vectors
+        filt_batch = self.filtration(x_filt, simplices_batch)
         graph_vec, node_vec = self.ph(
             filt_batch, device=x_eqv.device, num_nodes=M)
 
