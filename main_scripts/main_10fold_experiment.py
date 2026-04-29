@@ -55,9 +55,10 @@ def main():
     # create the experiments dirs
     create_dirs([config.summary_dir, config.checkpoint_dir])
     doc_utils.doc_used_config(config)
+    num_folds = getattr(config, 'num_folds', 10)
     base_checkpoint_dir = config.checkpoint_dir
     for exp in range(1, config.num_exp+1):
-        for fold in range(1, 11):
+        for fold in range(1, num_folds+1):
             print("Experiment num = {0}\nFold num = {1}".format(exp, fold))
             # per-fold checkpoint dir so folds don't clobber or resume from each other
             config.checkpoint_dir = os.path.join(base_checkpoint_dir, "fold_{}".format(fold))
