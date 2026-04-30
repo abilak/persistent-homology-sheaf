@@ -14,12 +14,15 @@ class ModelWrapper(object):
         self.model = BaseModel(config).to(DEVICE)
 
     # save function that saves the checkpoint in the path defined in the config file
-    def save(self, best: bool, epoch: int, optimizer: torch.optim.Optimizer):
+    def save(self, best: bool, epoch: int, optimizer: torch.optim.Optimizer,
+             best_val_loss=None, best_epoch=None):
         filename = 'best.tar' if best else 'last.tar'
         print("Saving model as {}...".format(filename), end=' ')
         torch.save({'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict()},
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'best_epoch': best_epoch},
                    os.path.join(self.config.checkpoint_dir, filename))
         print("Model saved.")
 

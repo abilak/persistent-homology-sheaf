@@ -5,6 +5,10 @@ import pickle
 
 NUM_LABELS = {'ENZYMES': 3, 'COLLAB': 0, 'IMDBBINARY': 0, 'IMDBMULTI': 0, 'MUTAG': 7, 'NCI1': 37, 'NCI109': 38,
               'PROTEINS': 3, 'PTC': 22, 'DD': 89}
+# Per-dataset node-count cap: graphs with more than this many nodes are dropped at load
+# time to keep memory manageable. DD has graphs up to ~5748 nodes; the N x N x 90 float32
+# tensor is O(N^2) so a handful of huge graphs blow past available RAM/GPU memory.
+MAX_NODES = {'DD': 500}
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -12,18 +16,25 @@ def load_dataset(ds_name):
     """
     construct graphs and labels from dataset text in data folder
     :param ds_name: name of data set you want to load
-    :return: two numpy arrays of shape (num_of_graphs).
-            the graphs array contains in each entry a ndarray represent adjacency matrix of a graph of shape (num_vertex, num_vertex, num_vertex_labels)
-            the labels array in index i represent the class of graphs[i]
+    :return: graphs (object ndarray), labels (ndarray), kept_indices (list[int] or None)
+            kept_indices maps positions in the returned arrays back to the original
+            index in the dataset file; it is None when no filtering was applied.
     """
     directory = BASE_DIR + "/data/benchmark_graphs/{0}/{0}.txt".format(ds_name)
+    max_nodes = MAX_NODES.get(ds_name)
     graphs = []
     labels = []
+    kept_indices = []
     with open(directory, "r") as data:
         num_graphs = int(data.readline().rstrip().split(" ")[0])
         for i in range(num_graphs):
             graph_meta = data.readline().rstrip().split(" ")
             num_vertex = int(graph_meta[0])
+            if max_nodes is not None and num_vertex > max_nodes:
+                # consume the vertex lines to keep the file pointer aligned
+                for _ in range(num_vertex):
+                    data.readline()
+                continue
             curr_graph = np.zeros(shape=(num_vertex, num_vertex, NUM_LABELS[ds_name]+1), dtype=np.float32)
             labels.append(int(graph_meta[1]))
             for j in range(num_vertex):
@@ -34,10 +45,13 @@ def load_dataset(ds_name):
                     curr_graph[j, int(vertex[k]), 0] = 1.
             curr_graph = normalize_graph(curr_graph)
             graphs.append(curr_graph)
+            kept_indices.append(i)
     graphs = np.array(graphs, dtype=object)
     for i in range(graphs.shape[0]):
         graphs[i] = np.transpose(graphs[i], [2,0,1])
-    return graphs, np.array(labels)
+    if max_nodes is None or len(kept_indices) == num_graphs:
+        return graphs, np.array(labels), None
+    return graphs, np.array(labels), kept_indices
 
 
 def load_qm9(target_param):
@@ -223,6 +237,6 @@ def normalize_graph(curr_graph):
 
 
 if __name__ == '__main__':
-    graphs, labels = load_dataset("MUTAG")
+    graphs, labels, _ = load_dataset("MUTAG")
     a, b = get_train_val_indexes(1, "MUTAG")
     print(np.transpose(graphs[a[0]], [1, 2, 0])[0])

@@ -74,7 +74,7 @@ def summary_10fold_results(summary_dir):
     df = pd.read_csv(os.path.join(summary_dir, 'per_epoch_stats.csv'))
 
     df = df.drop(['train_loss', 'train_accuracy', 'timestamp', 'experiment_name'], axis=1)  # drop irrelevant columns
-    df_group_std = df.groupby('epoch').std()
+    df_group_std = df.groupby('epoch').std(ddof=0)
     df_group = df.groupby('epoch').mean()
     df_group['std'] = df_group_std.val_accuracy
     best_epoch = df_group['val_accuracy'].idxmax()
@@ -87,7 +87,7 @@ def summary_10fold_results(summary_dir):
 
     # Document the validation results of the best epoch, per experiment
     df2 = df[df.epoch == best_epoch].copy()
-    df2['fold'] = pd.Series(range(10), index=df2.index) + 1
+    df2['fold'] = list(range(1, len(df2) + 1))
     mean_row = pd.DataFrame([[best_epoch, best_row['val_loss'], best_row['val_accuracy'], 'mean']], columns=df2.columns)
     df2 = pd.concat([df2, mean_row], ignore_index=True)
     fullpath = os.path.join(summary_dir, 'exp_summary.csv')

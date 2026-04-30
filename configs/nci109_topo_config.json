@@ -1,5 +1,5 @@
 {
-  "dataset_name": "NCI1",
+  "dataset_name": "NCI109",
   "max_to_keep": 1,
   "gpu": "0",
   "num_exp": 1,
