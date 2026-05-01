@@ -20,7 +20,6 @@
 
   "hyperparams": {
     "batch_size": 16,
-    "optimizer": "adam",
-    "decay_rate": 0.75
+    "optimizer": "adam"
   }
 }
