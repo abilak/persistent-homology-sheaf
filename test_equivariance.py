@@ -44,7 +44,6 @@ def test_topology_layer_equivariance(M=8, d_eqv=4, d_filt=3,
 
     layer = TopologyLayer(
         eqv_features=d_eqv,
-        filt_features=d_filt,
         hidden_dim=16,
         max_ph_dim=1,
         num_stats=32  # matching the updated config
@@ -59,14 +58,10 @@ def test_topology_layer_equivariance(M=8, d_eqv=4, d_filt=3,
         adj = adj + adj.T
         np.fill_diagonal(adj, 1.0)
 
-        # Random features: B=1, d_filt channels (channel 0 = adj, rest random)
-        x_filt = torch.randn(1, d_filt, M, M, device=device)
-        x_filt[0, 0] = torch.from_numpy(adj)
-        # Make symmetric for realism
-        x_filt = (x_filt + x_filt.transpose(-1, -2)) / 2
-
-        # Random equivariant features
+        # Random equivariant features: B=1, d_eqv channels (channel 0 = adj, rest random)
         x_eqv = torch.randn(1, d_eqv, M, M, device=device)
+        x_eqv[0, 0] = torch.from_numpy(adj)
+        # Make symmetric for realism
         x_eqv = (x_eqv + x_eqv.transpose(-1, -2)) / 2
 
         # Build simplicial complexes from original adjacency
@@ -81,16 +76,15 @@ def test_topology_layer_equivariance(M=8, d_eqv=4, d_filt=3,
         simplices_perm = [build_clique_complex(adj_perm, max_dim=2)]
 
         # Permuted features
-        x_filt_perm = permute_tensor(x_filt, perm)
         x_eqv_perm = permute_tensor(x_eqv, perm)
 
         # Forward pass on original
         with torch.no_grad():
-            out_orig = layer(x_eqv, x_filt, simplices_orig)
+            out_orig = layer(x_eqv, simplices_orig)
 
         # Forward pass on permuted
         with torch.no_grad():
-            out_perm = layer(x_eqv_perm, x_filt_perm, simplices_perm)
+            out_perm = layer(x_eqv_perm, simplices_perm)
 
         # Permute the original output and compare
         out_orig_permuted = permute_tensor(out_orig, perm)
