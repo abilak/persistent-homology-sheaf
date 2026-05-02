@@ -4,6 +4,7 @@
   "gpu": "0",
   "num_exp": 1,
   "exp_name": "10fold_cross_validation",
+  "num_folds": 7,
   "val_exist": true,
 
   "architecture": {
@@ -18,7 +19,7 @@
   },
 
   "hyperparams": {
-    "batch_size": 32,
+    "batch_size": 16,
     "optimizer": "adam"
   }
 }
