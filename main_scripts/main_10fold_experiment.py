@@ -29,6 +29,13 @@ def main():
     try:
         args = get_args()
         config = process_config(args.config, args.dataset_name, use_topology=args.use_topology)
+        config.use_checkpoint = getattr(args, 'use_checkpoint', False)
+
+        # If resuming, reuse the existing experiment directory
+        if args.resume_dir:
+            config.use_checkpoint = True
+            config.summary_dir = os.path.join(args.resume_dir, "summary/")
+            config.checkpoint_dir = os.path.join(args.resume_dir, "checkpoint/")
 
     except Exception as e:
         print("missing or invalid arguments {}".format(e))
@@ -48,9 +55,14 @@ def main():
     # create the experiments dirs
     create_dirs([config.summary_dir, config.checkpoint_dir])
     doc_utils.doc_used_config(config)
+    num_folds = getattr(config, 'num_folds', 10)
+    base_checkpoint_dir = config.checkpoint_dir
     for exp in range(1, config.num_exp+1):
-        for fold in range(1, 11):
+        for fold in range(1, num_folds+1):
             print("Experiment num = {0}\nFold num = {1}".format(exp, fold))
+            # per-fold checkpoint dir so folds don't clobber or resume from each other
+            config.checkpoint_dir = os.path.join(base_checkpoint_dir, "fold_{}".format(fold))
+            create_dirs([config.checkpoint_dir])
             # create your data generator
             config.num_fold = fold
             data = DataGenerator(config)

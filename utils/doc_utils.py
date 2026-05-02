@@ -76,7 +76,7 @@ def summary_10fold_results(summary_dir):
     df = pd.read_csv(os.path.join(summary_dir, 'per_epoch_stats.csv'))
 
     df = df.drop(['train_loss', 'train_accuracy', 'timestamp', 'experiment_name'], axis=1)  # drop irrelevant columns
-    df_group_std = df.groupby('epoch').std()
+    df_group_std = df.groupby('epoch').std(ddof=0)
     df_group = df.groupby('epoch').mean()
     df_group['std'] = df_group_std.val_accuracy
     best_epoch = df_group['val_accuracy'].idxmax()

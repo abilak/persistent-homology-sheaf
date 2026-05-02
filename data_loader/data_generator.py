@@ -47,7 +47,7 @@ class DataGenerator:
 
     # load data for a benchmark graph (COLLAB, NCI1, NCI109, MUTAG, PTC, IMDBBINARY, IMDBMULTI, PROTEINS)
     def load_data_benchmark(self):
-        graphs, labels = helper.load_dataset(self.config.dataset_name)
+        graphs, labels, kept_indices = helper.load_dataset(self.config.dataset_name)
         # if no fold specify creates random split to train and validation
         if self.config.num_fold is None:
             graphs, labels = helper.shuffle(graphs, labels)
@@ -55,15 +55,28 @@ class DataGenerator:
             self.train_graphs, self.train_labels, self.val_graphs, self.val_labels = graphs[idx:], labels[idx:], graphs[:idx], labels[:idx]
         elif self.config.num_fold == 0:
             train_idx, test_idx = helper.get_parameter_split(self.config.dataset_name)
+            train_idx, test_idx = self._remap_fold_indices(train_idx, test_idx, kept_indices)
             self.train_graphs, self.train_labels, self.val_graphs, self.val_labels = graphs[train_idx], labels[
                 train_idx], graphs[test_idx], labels[test_idx]
         else:
             train_idx, test_idx = helper.get_train_val_indexes(self.config.num_fold, self.config.dataset_name)
+            train_idx, test_idx = self._remap_fold_indices(train_idx, test_idx, kept_indices)
             self.train_graphs, self.train_labels, self.val_graphs, self.val_labels = graphs[train_idx], labels[train_idx], graphs[test_idx], labels[
                 test_idx]
         # change validation graphs to the right shape
         self.train_size = len(self.train_graphs)
         self.val_size = len(self.val_graphs)
+
+    @staticmethod
+    def _remap_fold_indices(train_idx, test_idx, kept_indices):
+        # When load_dataset drops oversized graphs, the precomputed fold-index files still
+        # reference original positions. Filter dropped indices and remap to the compacted array.
+        if kept_indices is None:
+            return train_idx, test_idx
+        old_to_new = {old: new for new, old in enumerate(kept_indices)}
+        train_idx = [old_to_new[i] for i in train_idx if i in old_to_new]
+        test_idx = [old_to_new[i] for i in test_idx if i in old_to_new]
+        return train_idx, test_idx
 
     def next_batch(self):
         graphs, labels = next(self.iter)

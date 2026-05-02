@@ -13,6 +13,7 @@ class Trainer(object):
         self.best_epoch = -1
         self.cur_epoch = 0
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.use_checkpoint = getattr(config, 'use_checkpoint', False)
 
         self.model_wrapper = model_wrapper
         self.config = config
@@ -33,6 +34,10 @@ class Trainer(object):
         Trains for the num of epochs in the config.
         :return:
         """
+        # Resume from checkpoint if available
+        if self.use_checkpoint:
+            self._try_resume()
+
         for cur_epoch in range(self.cur_epoch, self.config.num_epochs, 1):
             # train epoch
             train_acc, train_loss = self.train_epoch(cur_epoch)
@@ -42,11 +47,45 @@ class Trainer(object):
                 val_acc, val_loss = self.validate(cur_epoch)
                 # document results
                 doc_utils.write_to_file_doc(train_acc, train_loss, val_acc, val_loss, cur_epoch, self.config)
+
+                # save checkpoint every epoch (classification + QM9)
+                if self.use_checkpoint:
+                    self._save_checkpoint(cur_epoch, val_loss)
+
         if self.config.val_exist:
             # creates plots for accuracy and loss during training
             if not self.is_QM9:
                 doc_utils.create_experiment_results_plot(self.config.exp_name, "accuracy", self.config.summary_dir)
             doc_utils.create_experiment_results_plot(self.config.exp_name, "loss", self.config.summary_dir, log=True)
+
+    def _save_checkpoint(self, epoch, val_loss):
+        """Save last checkpoint every epoch, and best when val loss improves."""
+        # Always save last
+        self.model_wrapper.save(best=False, epoch=epoch, optimizer=self.optimizer,
+                                best_val_loss=self.best_val_loss, best_epoch=self.best_epoch)
+        # Save best if improved
+        if val_loss < self.best_val_loss:
+            self.best_val_loss = val_loss
+            self.best_epoch = epoch
+            self.model_wrapper.save(best=True, epoch=epoch, optimizer=self.optimizer,
+                                    best_val_loss=self.best_val_loss, best_epoch=self.best_epoch)
+            print("New best validation loss: {:.4f} at epoch {}".format(val_loss, epoch))
+
+    def _try_resume(self):
+        """Resume from last.tar checkpoint if it exists."""
+        import os
+        last_path = os.path.join(self.config.checkpoint_dir, 'last.tar')
+        if os.path.exists(last_path):
+            print("Resuming from checkpoint...")
+            checkpoint = torch.load(last_path, map_location=self.device)
+            self.model_wrapper.model.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.cur_epoch = checkpoint['epoch'] + 1
+            self.best_val_loss = checkpoint.get('best_val_loss', np.inf)
+            self.best_epoch = checkpoint.get('best_epoch', -1)
+            print("Resumed from epoch {}".format(self.cur_epoch))
+        else:
+            print("No checkpoint found, starting from scratch.")
 
     def train_epoch(self, num_epoch=None):
         """
@@ -99,6 +138,7 @@ class Trainer(object):
 
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model_wrapper.model.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         return loss.cpu().item(), correct_labels_or_distances
