@@ -12,14 +12,16 @@
     "depth_of_mlp": 2,
     "new_suffix": true,
     "use_topology": true,
-    "topo_hidden_dim": 32,
+    "topo_hidden_dim": 16,
     "topo_max_ph_dim": 1,
-    "topo_num_stats": 32,
+    "topo_num_stats": 4,
     "topo_max_simplex_dim": 2
   },
 
   "hyperparams": {
-    "batch_size": 16,
+    "batch_size": 32,
+    "learning_rate": 0.0001,
+    "decay_rate": 0.75,
     "optimizer": "adam"
   }
 }
