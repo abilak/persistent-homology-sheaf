@@ -4,7 +4,7 @@ import pickle
 
 
 NUM_LABELS = {'ENZYMES': 3, 'COLLAB': 0, 'IMDBBINARY': 0, 'IMDBMULTI': 0, 'MUTAG': 7, 'NCI1': 37, 'NCI109': 38,
-              'PROTEINS': 3, 'PTC': 22, 'DD': 89, 'ZINC': 28}
+              'PROTEINS': 3, 'PTC': 22, 'DD': 89, 'ZINC': 32}
 # Per-dataset node-count cap: graphs with more than this many nodes are dropped at load
 # time to keep memory manageable. DD has graphs up to ~5748 nodes; the N x N x 90 float32
 # tensor is O(N^2) so a handful of huge graphs blow past available RAM/GPU memory.
