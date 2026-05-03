@@ -58,6 +58,9 @@ class Trainer(object):
                 doc_utils.create_experiment_results_plot(self.config.exp_name, "accuracy", self.config.summary_dir)
             doc_utils.create_experiment_results_plot(self.config.exp_name, "loss", self.config.summary_dir, log=True)
 
+        # Final gate summary
+        self._log_final_gate_summary()
+
     def _save_checkpoint(self, epoch, val_loss):
         """Save last checkpoint every epoch, and best when val loss improves."""
         # Always save last
@@ -118,6 +121,13 @@ class Trainer(object):
         tt.close()
         self.scheduler.step()
 
+        # Log mean gate activation per topology layer
+        self._log_gate_values(num_epoch)
+
+        # Log topology diagnostics at epoch 1 and final epoch
+        if num_epoch == 0 or num_epoch == self.config.num_epochs - 1:
+            self._log_topology_diagnostics(num_epoch)
+
         loss_per_epoch = total_loss/self.data_loader.train_size
         if not self.is_QM9:
             acc_per_epoch = total_correct_labels_or_distances/self.data_loader.train_size
@@ -142,6 +152,148 @@ class Trainer(object):
         self.optimizer.step()
 
         return loss.cpu().item(), correct_labels_or_distances
+
+    def _log_gate_values(self, epoch):
+        """Log mean sigmoid(gate) per topology layer and running average."""
+        model = self.model_wrapper.model
+        if not getattr(model, 'use_topology', False) or model.topo_layers is None:
+            return
+
+        # Initialize accumulator on first call
+        if not hasattr(self, '_gate_history'):
+            self._gate_history = [[] for _ in model.topo_layers]
+
+        gate_values = []
+        for i, topo_layer in enumerate(model.topo_layers):
+            gate_mean = getattr(topo_layer, 'last_gate_mean', None)
+            if gate_mean is not None:
+                gate_values.append(gate_mean)
+                self._gate_history[i].append(gate_mean)
+
+        if gate_values:
+            avg_across_layers = sum(gate_values) / len(gate_values)
+            print("\t\tGate σ(γ) [epoch {}]: avg={:.4f}".format(epoch, avg_across_layers))
+            # Write to gate log file
+            import os
+            gate_log = os.path.join(self.config.summary_dir, "gate_log.txt")
+            with open(gate_log, 'a') as f:
+                f.write("{},{:.4f},{}\n".format(
+                    epoch, avg_across_layers,
+                    ",".join(["{:.4f}".format(v) for v in gate_values])))
+
+    def _log_final_gate_summary(self):
+        """Print final gate summary at end of training."""
+        model = self.model_wrapper.model
+        if not getattr(model, 'use_topology', False) or model.topo_layers is None:
+            return
+        if not hasattr(self, '_gate_history'):
+            return
+
+        print("\n\t\t===== Final Gate Summary =====")
+        all_values = []
+        for i, history in enumerate(self._gate_history):
+            if history:
+                layer_avg = sum(history) / len(history)
+                all_values.extend(history)
+                print("\t\tLayer {}: mean σ(γ) = {:.4f} (over {} epochs)".format(i, layer_avg, len(history)))
+        if all_values:
+            overall_avg = sum(all_values) / len(all_values)
+            print("\t\tOverall: mean σ(γ) = {:.4f}".format(overall_avg))
+        print("\t\t==============================\n")
+
+        # Also log per-graph gate values on test set
+        self._log_test_per_graph_gates()
+        self._save_representative_filtrations()
+
+    def _log_topology_diagnostics(self, epoch):
+        """Log persistence pair counts, tie fractions, and filtration stats."""
+        import os
+        model = self.model_wrapper.model
+        if not getattr(model, 'use_topology', False) or model.topo_layers is None:
+            return
+
+        diag_path = os.path.join(self.config.summary_dir, "topo_diagnostics.txt")
+        with open(diag_path, 'a') as f:
+            f.write("=== Epoch {} ===\n".format(epoch))
+            for i, topo_layer in enumerate(model.topo_layers):
+                ph = topo_layer.ph
+                if ph.last_pair_counts is not None:
+                    # Average pair counts across batch
+                    dims = range(ph.max_ph_dim + 1)
+                    avg_counts = {d: np.mean([pc[d] for pc in ph.last_pair_counts]) for d in dims}
+                    f.write("  Layer {} pair counts: {}\n".format(i, 
+                        {d: "{:.1f}".format(v) for d, v in avg_counts.items()}))
+                if ph.last_tie_fractions is not None:
+                    avg_tie = np.mean(ph.last_tie_fractions)
+                    f.write("  Layer {} tie fraction: {:.4f}\n".format(i, avg_tie))
+                if ph.last_filt_mean is not None:
+                    f.write("  Layer {} filt mean={:.4f}, std={:.4f}\n".format(
+                        i, ph.last_filt_mean, ph.last_filt_std))
+            f.write("\n")
+        print("\t\tTopology diagnostics logged for epoch {}".format(epoch))
+
+    def _log_test_per_graph_gates(self):
+        """Log per-graph gate values during test set evaluation."""
+        import os
+        model = self.model_wrapper.model
+        if not getattr(model, 'use_topology', False) or model.topo_layers is None:
+            return
+
+        # Run a pass over test data collecting per-graph gates
+        self.data_loader.initialize('test' if not self.config.val_exist else 'val')
+        self.model_wrapper.eval()
+
+        per_graph_gates = []
+        num_iters = (self.data_loader.num_iterations_test if not self.config.val_exist
+                     else self.data_loader.num_iterations_val)
+
+        with torch.no_grad():
+            for _ in range(min(num_iters, 10)):  # cap at 10 batches
+                graph, label = self.data_loader.next_batch()
+                self.model_wrapper.run_model_get_loss_and_results(graph, label)
+                # Collect gate values from each topology layer
+                for topo_layer in model.topo_layers:
+                    gate_mean = getattr(topo_layer, 'last_gate_mean', None)
+                    if gate_mean is not None:
+                        per_graph_gates.append(gate_mean)
+
+        if per_graph_gates:
+            gate_path = os.path.join(self.config.summary_dir, "test_per_graph_gates.txt")
+            with open(gate_path, 'w') as f:
+                f.write("per_batch_gate_means\n")
+                for g in per_graph_gates:
+                    f.write("{:.4f}\n".format(g))
+            print("\t\tPer-graph gate values saved ({} entries)".format(len(per_graph_gates)))
+
+    def _save_representative_filtrations(self):
+        """Save actual filtration values for 3-5 representative test graphs."""
+        import os, json
+        model = self.model_wrapper.model
+        if not getattr(model, 'use_topology', False) or model.topo_layers is None:
+            return
+
+        self.data_loader.initialize('test' if not self.config.val_exist else 'val')
+        self.model_wrapper.eval()
+
+        # Get one batch and save filtration info from PH layers
+        with torch.no_grad():
+            graph, label = self.data_loader.next_batch()
+            self.model_wrapper.run_model_get_loss_and_results(graph, label)
+
+        # Collect from the first topo layer's PH
+        ph = model.topo_layers[0].ph
+        if ph.last_pair_counts is None:
+            return
+
+        filt_path = os.path.join(self.config.summary_dir, "representative_filtrations.txt")
+        with open(filt_path, 'w') as f:
+            f.write("Representative filtration stats (first batch, first layer)\n")
+            f.write("Pair counts per graph: {}\n".format(ph.last_pair_counts[:5]))
+            f.write("Tie fractions per graph: {}\n".format(
+                ["{:.4f}".format(t) for t in ph.last_tie_fractions[:5]]))
+            f.write("Batch filt mean={:.4f}, std={:.4f}\n".format(
+                ph.last_filt_mean, ph.last_filt_std))
+        print("\t\tRepresentative filtrations saved.")
 
     def validate(self, epoch):
         """

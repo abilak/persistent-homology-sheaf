@@ -178,6 +178,12 @@ class DifferentiablePH(nn.Module):
                 nn.Linear(2, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)
             ))
 
+        # Diagnostics (updated each forward pass, read by trainer)
+        self.last_pair_counts = None   # list of B dicts: {dim: count}
+        self.last_tie_fractions = None  # list of B floats
+        self.last_filt_mean = None     # float
+        self.last_filt_std = None      # float
+
     @staticmethod
     def _make_non_decreasing(filt_tensor, simplices_list, simplex_to_idx):
         """
@@ -262,6 +268,10 @@ class DifferentiablePH(nn.Module):
 
         vectors = []
         node_vectors = []
+        # Diagnostics accumulators
+        _pair_counts = []   # per-graph: {dim: count}
+        _tie_fracs = []     # per-graph: fraction of pairs with tied birth/death
+        _filt_vals_all = [] # all filtration values across batch
         for graph_filt in filtration_batch:
             # Map each simplex to an index for differentiable lookup
             simplex_to_idx = {}
@@ -321,6 +331,19 @@ class DifferentiablePH(nn.Module):
                                 | val_to_nodes[(len(death_simplex), dv_r)])
                     dim_data[dim].append((bp, involved))
 
+            # Collect diagnostics for this graph
+            _pair_counts.append({d: len(dim_data[d]) for d in range(self.max_ph_dim + 1)})
+            _filt_vals_all.extend(filt_vals_list)
+            # Tie fraction: count pairs where birth == death (zero persistence)
+            total_pairs = sum(len(dim_data[d]) for d in range(self.max_ph_dim + 1))
+            if total_pairs > 0:
+                tied = sum(1 for d in range(self.max_ph_dim + 1)
+                           for (bp_t, _) in dim_data[d]
+                           if bp_t[1].item() < 1e-6)
+                _tie_fracs.append(tied / total_pairs)
+            else:
+                _tie_fracs.append(0.0)
+
             # Attention-pooling: graph-level + node-level per dimension
             graph_parts = []
             node_parts = []
@@ -369,6 +392,19 @@ class DifferentiablePH(nn.Module):
 
         graph_out = torch.stack(vectors)
         node_out = torch.stack(node_vectors) if node_vectors else None
+
+        # Store diagnostics
+        self.last_pair_counts = _pair_counts
+        self.last_tie_fractions = _tie_fracs
+        if _filt_vals_all:
+            import numpy as np
+            arr = np.array(_filt_vals_all)
+            self.last_filt_mean = float(arr.mean())
+            self.last_filt_std = float(arr.std())
+        else:
+            self.last_filt_mean = 0.0
+            self.last_filt_std = 0.0
+
         return graph_out, node_out
 
 
@@ -452,5 +488,8 @@ class TopologyLayer(nn.Module):
         gate = torch.sigmoid(self.gate_conv(combined))
         delta = self.fusion(combined)
         out = x_eqv + gate * delta
+
+        # Store mean gate activation for logging (detached, no grad overhead)
+        self.last_gate_mean = gate.mean().item()
 
         return out
