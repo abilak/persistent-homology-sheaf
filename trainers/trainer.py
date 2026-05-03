@@ -9,6 +9,7 @@ from utils import doc_utils
 class Trainer(object):
     def __init__(self, model_wrapper, data, config):
         self.is_QM9 = config.dataset_name == 'QM9'
+        self.is_regression = config.dataset_name in ('QM9', 'ZINC')
         self.best_val_loss = np.inf
         self.best_epoch = -1
         self.cur_epoch = 0
@@ -54,7 +55,7 @@ class Trainer(object):
 
         if self.config.val_exist:
             # creates plots for accuracy and loss during training
-            if not self.is_QM9:
+            if not self.is_regression:
                 doc_utils.create_experiment_results_plot(self.config.exp_name, "accuracy", self.config.summary_dir)
             doc_utils.create_experiment_results_plot(self.config.exp_name, "loss", self.config.summary_dir, log=True)
 
@@ -119,7 +120,7 @@ class Trainer(object):
         self.scheduler.step()
 
         loss_per_epoch = total_loss/self.data_loader.train_size
-        if not self.is_QM9:
+        if not self.is_regression:
             acc_per_epoch = total_correct_labels_or_distances/self.data_loader.train_size
             print("\t\tEpoch-{}  loss:{:.4f} -- acc:{:.4f}\n".format(num_epoch, loss_per_epoch, acc_per_epoch))
             return acc_per_epoch, loss_per_epoch
@@ -174,7 +175,7 @@ class Trainer(object):
         # tt.close()
 
         val_loss = total_loss/self.data_loader.val_size
-        if self.is_QM9:
+        if self.is_regression:
             val_dists = (total_correct_or_dist*self.data_loader.labels_std)/self.data_loader.val_size
             print("\t\tVal-{}  loss:{:.4f} -- mean_distances:\n{}\n".format(epoch, val_loss, val_dists))
 

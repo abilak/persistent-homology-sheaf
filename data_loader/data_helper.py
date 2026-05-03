@@ -4,7 +4,7 @@ import pickle
 
 
 NUM_LABELS = {'ENZYMES': 3, 'COLLAB': 0, 'IMDBBINARY': 0, 'IMDBMULTI': 0, 'MUTAG': 7, 'NCI1': 37, 'NCI109': 38,
-              'PROTEINS': 3, 'PTC': 22, 'DD': 89}
+              'PROTEINS': 3, 'PTC': 22, 'DD': 89, 'ZINC': 28}
 # Per-dataset node-count cap: graphs with more than this many nodes are dropped at load
 # time to keep memory manageable. DD has graphs up to ~5748 nodes; the N x N x 90 float32
 # tensor is O(N^2) so a handful of huge graphs blow past available RAM/GPU memory.
@@ -145,6 +145,38 @@ def get_parameter_split(ds_name):
         for line in file:
             test_idx.append(int(line.rstrip()))
     return train_idx, test_idx
+
+
+def load_zinc():
+    """
+    Load ZINC-10k dataset, already split into train/val/test pickles.
+    :return: 6 numpy arrays (train_graphs, train_labels, val_graphs, val_labels, test_graphs, test_labels)
+             each graph of shape: 33 x N x N (CHW representation)
+    """
+    train_graphs, train_labels = load_zinc_aux('train')
+    val_graphs, val_labels = load_zinc_aux('val')
+    test_graphs, test_labels = load_zinc_aux('test')
+    return train_graphs, train_labels, val_graphs, val_labels, test_graphs, test_labels
+
+
+def load_zinc_aux(which_set):
+    """
+    Read one split of ZINC-10k from pickle.
+    :param which_set: 'train', 'val', or 'test'
+    :return: graphs (object ndarray), labels (ndarray of shape Nx1)
+    """
+    base_path = BASE_DIR + "/data/ZINC/ZINC_{}.p".format(which_set)
+    graphs, labels = [], []
+    with open(base_path, 'rb') as f:
+        data = pickle.load(f)
+        for instance in data:
+            labels.append(instance['y'])
+            graphs.append(instance['graph'])
+    graphs = np.array(graphs, dtype=object)
+    for i in range(graphs.shape[0]):
+        graphs[i] = np.transpose(graphs[i], [2, 0, 1])  # HWC -> CHW
+    labels = np.array(labels, dtype=np.float32).reshape(-1, 1)
+    return graphs, labels
 
 
 def group_same_size(graphs, labels):

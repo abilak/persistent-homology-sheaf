@@ -11,7 +11,9 @@ class DataGenerator:
         # load data here
         self.batch_size = self.config.hyperparams.batch_size
         self.is_qm9 = self.config.dataset_name == 'QM9'
-        self.labels_dtype = torch.float32 if self.is_qm9 else torch.long
+        self.is_zinc = self.config.dataset_name == 'ZINC'
+        self.is_regression = self.is_qm9 or self.is_zinc
+        self.labels_dtype = torch.float32 if self.is_regression else torch.long
 
         self.load_data()
 
@@ -19,6 +21,8 @@ class DataGenerator:
     def load_data(self):
         if self.is_qm9:
             self.load_qm9_data()
+        elif self.is_zinc:
+            self.load_zinc_data()
         else:
             self.load_data_benchmark()
 
@@ -44,6 +48,27 @@ class DataGenerator:
         self.val_size = len(self.val_graphs)
         self.test_size = len(self.test_graphs)
         self.labels_std = train_labels_std  # Needed for postprocess, multiply mean abs distance by this std
+
+    # load ZINC-10k data set
+    def load_zinc_data(self):
+        train_graphs, train_labels, val_graphs, val_labels, test_graphs, test_labels = \
+            helper.load_zinc()
+
+        # preprocess labels by train set mean and std
+        train_labels_mean = train_labels.mean(axis=0)
+        train_labels_std = train_labels.std(axis=0)
+        train_labels = (train_labels - train_labels_mean) / train_labels_std
+        val_labels = (val_labels - train_labels_mean) / train_labels_std
+        test_labels = (test_labels - train_labels_mean) / train_labels_std
+
+        self.train_graphs, self.train_labels = train_graphs, train_labels
+        self.val_graphs, self.val_labels = val_graphs, val_labels
+        self.test_graphs, self.test_labels = test_graphs, test_labels
+
+        self.train_size = len(self.train_graphs)
+        self.val_size = len(self.val_graphs)
+        self.test_size = len(self.test_graphs)
+        self.labels_std = train_labels_std
 
     # load data for a benchmark graph (COLLAB, NCI1, NCI109, MUTAG, PTC, IMDBBINARY, IMDBMULTI, PROTEINS)
     def load_data_benchmark(self):
@@ -112,7 +137,7 @@ class DataGenerator:
         self.num_iterations_val = len(graphs)
         self.val_graphs_batches, self.val_labels_batches = graphs, labels
 
-        if self.is_qm9:
+        if self.is_qm9 or self.is_zinc:
             # Benchmark graphs have no test sets
             graphs, labels = helper.group_same_size(self.test_graphs, self.test_labels)
             graphs, labels = helper.split_to_batches(graphs, labels, self.batch_size)

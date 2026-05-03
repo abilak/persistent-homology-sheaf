@@ -45,11 +45,11 @@ class ModelWrapper(object):
     def loss_and_results(self, scores, labels):
         """
         :param scores: shape NxC
-        :param labels: shape Nx1 for classification, shape NxC for regression (QM9)
-        :return: tuple of (loss tensor, dists numpy array) for QM9
+        :param labels: shape Nx1 for classification, shape NxC for regression (QM9, ZINC)
+        :return: tuple of (loss tensor, dists numpy array) for regression
                           (loss tensor, number of correct predictions) for classification graphs
         """
-        if self.config.dataset_name == 'QM9':
+        if self.config.dataset_name in ('QM9', 'ZINC'):
             differences = (scores-labels).abs().sum(dim=0)
             loss = differences.sum()
             dists = differences.detach().cpu().numpy()
