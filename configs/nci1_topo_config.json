@@ -14,7 +14,7 @@
     "use_topology": true,
     "topo_hidden_dim": 32,
     "topo_max_ph_dim": 1,
-    "topo_num_stats": 16,
+    "topo_num_stats": 32,
     "topo_max_simplex_dim": 2
   },
 

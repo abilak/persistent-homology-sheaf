@@ -53,11 +53,20 @@ class BaseModel(nn.Module):
             self.fc_layers.append(modules.FullyConnected(512, 256))
             self.fc_layers.append(modules.FullyConnected(256, self.config.num_classes, activation_fn=None))
 
+        # Cache for simplicial complexes (keyed by adjacency bytes)
+        self._simplicial_cache = {}
+
     def _build_simplicial_complexes(self, input):
-        """Extract adjacency from channel 0 and build clique complexes per graph."""
+        """Extract adjacency from channel 0 and build clique complexes per graph, with caching."""
         adj_batch = input[:, 0, :, :].detach().cpu().numpy()
         max_dim = getattr(self.config.architecture, 'topo_max_simplex_dim', 2)
-        return [build_clique_complex(adj, max_dim=max_dim) for adj in adj_batch]
+        results = []
+        for adj in adj_batch:
+            key = adj.tobytes()
+            if key not in self._simplicial_cache:
+                self._simplicial_cache[key] = build_clique_complex(adj, max_dim=max_dim)
+            results.append(self._simplicial_cache[key])
+        return results
 
     def forward(self, input):
         x = input
