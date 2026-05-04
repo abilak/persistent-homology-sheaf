@@ -4,7 +4,7 @@
   "gpu": "0",
   "num_exp": 1,
   "exp_name": "10fold_cross_validation",
-  "num_folds": 7,
+  "num_folds": 1,
   "val_exist": true,
 
   "architecture": {
