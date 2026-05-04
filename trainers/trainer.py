@@ -14,6 +14,7 @@ class Trainer(object):
         self.cur_epoch = 0
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.use_checkpoint = getattr(config, 'use_checkpoint', False)
+        self.ablation_mode = getattr(config.architecture, 'ablation_mode', None)
 
         self.model_wrapper = model_wrapper
         self.config = config
@@ -144,7 +145,8 @@ class Trainer(object):
         :return: tuple of (loss, num_correct_labels or distances_array)
         """
         graphs, labels = self.data_loader.next_batch()
-        loss, correct_labels_or_distances = self.model_wrapper.run_model_get_loss_and_results(graphs, labels)
+        loss, correct_labels_or_distances = self.model_wrapper.run_model_get_loss_and_results(
+            graphs, labels, ablation_mode=self.ablation_mode)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -477,7 +479,8 @@ class Trainer(object):
             # One Train step on the current batch
             graph, label = self.data_loader.next_batch()
             # label = np.expand_dims(label, 0)
-            loss, correct_or_dist = self.model_wrapper.run_model_get_loss_and_results(graph, label)
+            loss, correct_or_dist = self.model_wrapper.run_model_get_loss_and_results(
+                graph, label, ablation_mode=self.ablation_mode)
 
             # update metrics returned from train_step func
             total_loss += loss.cpu().item()

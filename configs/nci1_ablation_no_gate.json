@@ -3,7 +3,7 @@
   "max_to_keep": 1,
   "gpu": "0",
   "num_exp": 1,
-"num_folds": 1,
+  "num_folds": 3,
   "exp_name": "10fold_cross_validation",
   "val_exist": true,
 
@@ -15,7 +15,8 @@
     "topo_hidden_dim": 32,
     "topo_max_ph_dim": 1,
     "topo_num_stats": 16,
-    "topo_max_simplex_dim": 2
+    "topo_max_simplex_dim": 2,
+    "ablation_mode": "no_gate"
   },
 
   "hyperparams": {
