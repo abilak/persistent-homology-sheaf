@@ -295,6 +295,165 @@ class Trainer(object):
                 ph.last_filt_mean, ph.last_filt_std))
         print("\t\tRepresentative filtrations saved.")
 
+    def evaluate_ablations(self, fold_num=None):
+        """
+        Run ablation evaluation at end of fold using the fully-trained model.
+        Tests the same trained weights under modified forward passes:
+          1. 'no_node_features': zeros out t_u, t_v (node-level PH features)
+          2. 'no_gate': removes gating, uses plain additive fusion
+
+        Returns dict of ablation results and writes detailed report to summary dir.
+        """
+        import os
+        model = self.model_wrapper.model
+        if not getattr(model, 'use_topology', False) or model.topo_layers is None:
+            return None
+
+        ablation_modes = [
+            ('full', None),
+            ('no_node_features', 'no_node_features'),
+            ('no_gate', 'no_gate'),
+        ]
+
+        results = {}
+        for mode_name, mode_flag in ablation_modes:
+            # Evaluate on validation set (used as test in 10-fold)
+            self.data_loader.initialize('val')
+            self.model_wrapper.eval()
+
+            total_loss = 0.
+            total_correct = 0.
+            total_samples = 0
+            per_batch_details = []
+
+            with torch.no_grad():
+                for _ in range(self.data_loader.num_iterations_val):
+                    graph, label = self.data_loader.next_batch()
+                    loss, correct = self.model_wrapper.run_model_get_loss_and_results(
+                        graph, label, ablation_mode=mode_flag)
+                    batch_size = label.shape[0]
+                    total_loss += loss.cpu().item()
+                    total_correct += correct
+                    total_samples += batch_size
+                    per_batch_details.append({
+                        'batch_size': batch_size,
+                        'batch_correct': correct,
+                        'batch_loss': loss.cpu().item(),
+                    })
+
+            acc = total_correct / total_samples if total_samples > 0 else 0.0
+            avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+
+            # Collect gate statistics for this mode
+            gate_means = []
+            for topo_layer in model.topo_layers:
+                gm = getattr(topo_layer, 'last_gate_mean', None)
+                if gm is not None:
+                    gate_means.append(gm)
+
+            results[mode_name] = {
+                'accuracy': acc,
+                'loss': avg_loss,
+                'total_correct': total_correct,
+                'total_samples': total_samples,
+                'num_batches': len(per_batch_details),
+                'gate_means': gate_means,
+                'per_batch_details': per_batch_details,
+            }
+
+        # Write detailed ablation report
+        report_path = os.path.join(self.config.summary_dir, "ablation_report.txt")
+        append_mode = 'a' if os.path.exists(report_path) else 'w'
+        with open(report_path, append_mode) as f:
+            f.write("=" * 70 + "\n")
+            f.write("ABLATION STUDY — Fold {}\n".format(fold_num if fold_num else "?"))
+            f.write("=" * 70 + "\n\n")
+
+            # Model info
+            n_params = sum(p.numel() for p in model.parameters())
+            n_topo_params = sum(p.numel() for tl in model.topo_layers for p in tl.parameters())
+            n_base_params = n_params - n_topo_params
+            f.write("  Model Parameters:\n")
+            f.write("    Total:              {}\n".format(n_params))
+            f.write("    Base (equivariant): {}\n".format(n_base_params))
+            f.write("    Topology branch:    {}\n".format(n_topo_params))
+            f.write("    Topology layers:    {}\n\n".format(len(model.topo_layers)))
+
+            # Architecture details
+            f.write("  Architecture Config:\n")
+            arch = self.config.architecture
+            f.write("    block_features:      {}\n".format(arch.block_features))
+            f.write("    depth_of_mlp:        {}\n".format(arch.depth_of_mlp))
+            f.write("    use_topology:        {}\n".format(arch.use_topology))
+            f.write("    topo_hidden_dim:     {}\n".format(arch.topo_hidden_dim))
+            f.write("    topo_max_ph_dim:     {}\n".format(arch.topo_max_ph_dim))
+            f.write("    topo_num_stats:      {}\n".format(arch.topo_num_stats))
+            f.write("    topo_max_simplex_dim:{}\n\n".format(arch.topo_max_simplex_dim))
+
+            # Ablation descriptions
+            f.write("  Ablation Descriptions:\n")
+            f.write("    'full':              Full model (T_graph + t_u + t_v, gated residual)\n")
+            f.write("    'no_node_features':  Zero out t_u and t_v; keep only T_graph\n")
+            f.write("                         Tests: Do node-level PH features contribute?\n")
+            f.write("                         Section 4.5 deviation: node features not in\n")
+            f.write("                         idealized architecture but theoretically justified.\n")
+            f.write("    'no_gate':           Remove sigmoid gate; plain additive fusion\n")
+            f.write("                         X^(l+1) = X^(l+1/2) + psi(X || T)\n")
+            f.write("                         Tests: Does learned gating help over plain residual?\n")
+            f.write("                         Section 3 deviation: gate not in base formulation.\n\n")
+
+            # Results table
+            f.write("  Results:\n")
+            f.write("    {:<22s} {:>10s} {:>10s} {:>8s} {:>8s}\n".format(
+                "Mode", "Accuracy", "Loss", "Correct", "Total"))
+            f.write("    {:<22s} {:>10s} {:>10s} {:>8s} {:>8s}\n".format(
+                "-" * 22, "-" * 10, "-" * 10, "-" * 8, "-" * 8))
+            for mode_name in ['full', 'no_node_features', 'no_gate']:
+                r = results[mode_name]
+                f.write("    {:<22s} {:>10.4f} {:>10.4f} {:>8d} {:>8d}\n".format(
+                    mode_name, r['accuracy'], r['loss'],
+                    int(r['total_correct']), r['total_samples']))
+
+            # Delta analysis
+            f.write("\n  Delta from Full Model:\n")
+            full_acc = results['full']['accuracy']
+            for mode_name in ['no_node_features', 'no_gate']:
+                r = results[mode_name]
+                delta = r['accuracy'] - full_acc
+                f.write("    {:<22s}: {:+.4f} ({:+.2f}%)\n".format(
+                    mode_name, delta, delta * 100))
+
+            # Gate statistics
+            f.write("\n  Gate Statistics (last batch, per topology layer):\n")
+            for mode_name in ['full', 'no_node_features', 'no_gate']:
+                r = results[mode_name]
+                gate_str = ", ".join(["{:.4f}".format(g) for g in r['gate_means']])
+                f.write("    {:<22s}: [{}]\n".format(mode_name, gate_str))
+
+            # Per-batch breakdown for full model
+            f.write("\n  Per-Batch Breakdown (full model):\n")
+            f.write("    {:>6s} {:>8s} {:>8s} {:>10s}\n".format(
+                "Batch", "Size", "Correct", "Loss"))
+            for i, bd in enumerate(results['full']['per_batch_details']):
+                f.write("    {:>6d} {:>8d} {:>8d} {:>10.4f}\n".format(
+                    i + 1, bd['batch_size'], int(bd['batch_correct']), bd['batch_loss']))
+
+            f.write("\n")
+
+        # Print summary to stdout
+        print("\n\t\t===== ABLATION RESULTS (Fold {}) =====".format(fold_num))
+        print("\t\t{:<22s} {:>10s} {:>8s}".format("Mode", "Accuracy", "Delta"))
+        print("\t\t{:<22s} {:>10s} {:>8s}".format("-" * 22, "-" * 10, "-" * 8))
+        full_acc = results['full']['accuracy']
+        for mode_name in ['full', 'no_node_features', 'no_gate']:
+            r = results[mode_name]
+            delta = r['accuracy'] - full_acc
+            delta_str = "{:+.2f}%".format(delta * 100) if mode_name != 'full' else "—"
+            print("\t\t{:<22s} {:>10.4f} {:>8s}".format(mode_name, r['accuracy'], delta_str))
+        print("\t\t======================================\n")
+
+        return results
+
     def validate(self, epoch):
         """
         Perform forward pass on the model with the validation set

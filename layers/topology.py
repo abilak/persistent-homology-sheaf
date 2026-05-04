@@ -43,6 +43,21 @@ def build_clique_complex(adj, max_dim=2):
                     triangles.append((u, v, w))
         simplices[2] = triangles
 
+    # 3-simplices: tetrahedra (4-cliques)
+    if max_dim >= 3:
+        triangle_set = set(simplices.get(2, []))
+        tetrahedra = []
+        for tri in simplices.get(2, []):
+            u, v, w = tri
+            for x in range(w + 1, M):
+                if ((u, x) in adj_set and (v, x) in adj_set and
+                    (w, x) in adj_set and
+                    (u, v, x) in triangle_set and
+                    (u, w, x) in triangle_set and
+                    (v, w, x) in triangle_set):
+                    tetrahedra.append((u, v, w, x))
+        simplices[3] = tetrahedra
+
     return simplices
 
 
@@ -455,11 +470,12 @@ class TopologyLayer(nn.Module):
         nn.init.normal_(self.gate_conv.weight, std=0.01)
         nn.init.constant_(self.gate_conv.bias, 2.0)  # sigmoid(2) ≈ 0.88
 
-    def forward(self, x_eqv, simplices_batch):
+    def forward(self, x_eqv, simplices_batch, ablation_mode=None):
         """
         Args:
             x_eqv:  B x d_eqv x M x M  (post-equivariant features)
             simplices_batch: list of B simplex dicts
+            ablation_mode: None (full model), 'no_node_features', or 'no_gate'
 
         Returns:
             B x d_eqv x M x M
@@ -479,17 +495,33 @@ class TopologyLayer(nn.Module):
         # Step 3: build per-pair topology features
         graph_bc = graph_vec.unsqueeze(-1).unsqueeze(-1).expand(
             B, -1, M, M)                                          # T_graph
-        node_row = node_vec.unsqueeze(-1).expand(B, -1, M, M)    # t_i
-        node_col = node_vec.unsqueeze(-2).expand(B, -1, M, M)    # t_j
 
-        # Step 4: gated residual fusion
+        if ablation_mode == 'no_node_features':
+            # Ablation: zero out node-level features t_i, t_j
+            node_row = torch.zeros_like(graph_bc)                 # zeros
+            node_col = torch.zeros_like(graph_bc)                 # zeros
+        else:
+            node_row = node_vec.unsqueeze(-1).expand(B, -1, M, M) # t_i
+            node_col = node_vec.unsqueeze(-2).expand(B, -1, M, M) # t_j
+
+        # Step 4: fusion
         combined = torch.cat(
             [x_eqv, graph_bc, node_row, node_col], dim=1)
-        gate = torch.sigmoid(self.gate_conv(combined))
-        delta = self.fusion(combined)
-        out = x_eqv + gate * delta
+
+        if ablation_mode == 'no_gate':
+            # Ablation: plain concat-MLP fusion (no gating, just additive)
+            delta = self.fusion(combined)
+            out = x_eqv + delta
+        else:
+            # Full model: gated residual fusion
+            gate = torch.sigmoid(self.gate_conv(combined))
+            delta = self.fusion(combined)
+            out = x_eqv + gate * delta
 
         # Store mean gate activation for logging (detached, no grad overhead)
-        self.last_gate_mean = gate.mean().item()
+        if ablation_mode != 'no_gate':
+            self.last_gate_mean = gate.mean().item()
+        else:
+            self.last_gate_mean = 1.0  # no gating, effectively gate=1
 
         return out

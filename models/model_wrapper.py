@@ -59,8 +59,8 @@ class ModelWrapper(object):
             correct_predictions = torch.eq(torch.argmax(scores, dim=1), labels).sum().cpu().item()
             return loss, correct_predictions
 
-    def run_model_get_loss_and_results(self, input, labels):
-        return self.loss_and_results(self.model(input), labels)
+    def run_model_get_loss_and_results(self, input, labels, ablation_mode=None):
+        return self.loss_and_results(self.model(input, ablation_mode=ablation_mode), labels)
 
     def train(self):
         self.model.train()

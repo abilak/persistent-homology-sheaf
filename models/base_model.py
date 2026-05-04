@@ -68,7 +68,7 @@ class BaseModel(nn.Module):
             results.append(self._simplicial_cache[key])
         return results
 
-    def forward(self, input):
+    def forward(self, input, ablation_mode=None):
         x = input
         scores = torch.tensor(0, device=input.device, dtype=x.dtype)
 
@@ -84,7 +84,7 @@ class BaseModel(nn.Module):
 
             # Steps 2-5: topology (filtration on X^(l+1/2) -> PH -> broadcast -> fuse)
             if self.use_topology:
-                x = self.topo_layers[i](x, simplices_batch)
+                x = self.topo_layers[i](x, simplices_batch, ablation_mode=ablation_mode)
 
             if self.config.architecture.new_suffix:
                 # use new suffix

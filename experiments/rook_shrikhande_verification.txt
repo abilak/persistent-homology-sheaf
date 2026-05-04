@@ -1,0 +1,95 @@
+======================================================================
+Empirical Verification of Corollary 6
+Rook graph (K4□K4) vs. Shrikhande graph
+======================================================================
+
+[0] Environment & reproducibility info
+  PyTorch version: 2.10.0
+  NumPy version:   2.4.3
+  Random seed:     42
+  Device:          cpu (deterministic)
+  Python:          3.11.1
+  Platform:        macOS-26.4-arm64-arm-64bit
+
+[1] Constructing graphs...
+
+[2] Verifying strongly regular parameters (16, 6, 2, 2)...
+  Rook: verified strongly regular (16, 6, 2, 2)
+  Shrikhande: verified strongly regular (16, 6, 2, 2)
+
+  Adjacency checksums (sum of entries):
+    Rook:       96 (expected: 16*6 = 96)
+    Shrikhande: 96 (expected: 16*6 = 96)
+
+  Adjacency spectrum (rounded):
+    Rook:       [np.float32(6.0), np.float32(2.0), np.float32(2.0), np.float32(2.0), np.float32(2.0), np.float32(2.0), np.float32(2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0)]
+    Shrikhande: [np.float32(6.0), np.float32(2.0), np.float32(2.0), np.float32(2.0), np.float32(2.0), np.float32(2.0), np.float32(2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0), np.float32(-2.0)]
+    (Both should have eigenvalues 6, 2, -2 with multiplicities 1, 6, 9)
+
+[3] Verifying clique structure (key topological difference)...
+  Rook:       32 triangles, 8 four-cliques
+  Shrikhande: 32 triangles, 0 four-cliques
+
+[4] Testing BASELINE model (Maron et al. 2019, no topology)...
+    (Should produce IDENTICAL outputs — 3-WL cannot distinguish)
+    Architecture: block_features=[64, 64], depth_of_mlp=2
+    Parameters: 38212
+    Rook  scores: [-0.07081316 -0.20687668]
+    Shrik scores: [-0.07081316 -0.20687667]
+    Max absolute difference: 0.0000000149
+    Outputs identical (< 1e-5): True
+
+[5] Testing TOPOLOGY-AUGMENTED model...
+    (Should produce DIFFERENT outputs — PH detects H2 difference)
+    Architecture: block_features=[64, 64], depth_of_mlp=2
+    Topology: max_ph_dim=2, max_simplex_dim=3, num_stats=16, hidden_dim=32
+    Parameters: 106956 (+68744 from topology)
+    Rook  scores: [-0.06077687  0.30270633]
+    Shrik scores: [-0.02516481  0.12100634]
+    Max absolute difference: 0.1816999912
+    Outputs different (> 1e-5): True
+
+[5b] Debugging: Checking simplicial complex and PH directly...
+    Rook  simplices: dim0=16, dim1=48, dim2=32, dim3=8
+    Shrik simplices: dim0=16, dim1=48, dim2=32, dim3=0
+    Rook  finite PH pairs by dim: {0: 15, 1: 24, 2: 8}
+    Shrik finite PH pairs by dim: {0: 15, 1: 31}
+    → H2 difference: Rook has 8 pairs, Shrikhande has 0 pairs
+
+[6] Examining intermediate equivariant representations (baseline)...
+    Max diff in pooled equivariant features: 0.0000000037
+    Representations identical: True
+
+======================================================================
+SUMMARY
+======================================================================
+  Both graphs: strongly regular (16, 6, 2, 2) — 3-WL equivalent
+  Rook: 8 four-cliques → 8 finite H2 pairs (lifetime 1/12 under degree filt)
+  Shrikhande: 0 four-cliques → 0 finite H2 pairs (all essential)
+
+  Baseline (≤ 3-WL):       outputs identical = True
+  Topology-augmented:      outputs different = True
+
+  --- Numerical Details ---
+  Baseline output difference:  1.49e-08
+  Topology output difference:  1.82e-01
+  Ratio (topo/base):           12193680.0x
+
+  --- Simplicial Complex Summary ---
+                             Rook   Shrikhande
+  Vertices (0-simp)            16           16
+  Edges (1-simp)               48           48
+  Triangles (2-simp)           32           32
+  Tetrahedra (3-simp)           8            0
+
+  --- Persistence Pairs (degree filtration) ---
+                             Rook   Shrikhande
+  H0 finite pairs              15           15
+  H1 finite pairs              24           31
+  H2 finite pairs               8            0
+
+  ✓ COROLLARY 6 VERIFIED: Topology model is strictly more expressive than 3-WL
+======================================================================
+
+  Reproduction: python scripts/verify_rook_shrikhande.py
+  Required packages: torch, numpy, gudhi, easydict
