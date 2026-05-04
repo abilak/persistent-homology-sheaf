@@ -3,7 +3,7 @@
   "max_to_keep": 1,
   "gpu": "0",
   "num_exp": 1,
-  "num_folds": 4,
+  "num_folds": 1,
   "exp_name": "10fold_cross_validation",
   "val_exist": true,
 
