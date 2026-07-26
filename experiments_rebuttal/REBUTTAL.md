@@ -94,25 +94,32 @@ changes.
 
 | Model (same code) | MUTAG | PTC | NCI1 | NCI109 |
 |---|---|---|---|---|
-| MLP (no message passing) | 91.8±6.7 | … | … | … |
-| GCN | 92.4±7.0 | … | … | … |
-| GIN | 92.1±7.2 | … | … | … |
-| GSN (subgraph counting) | 89.7±8.5* | … | … | … |
-| PPGN (baseline) | 88.2±5.8 | … | … | … |
-| **PPGN + PH (ours)** | **90.3±3.7*** | … | … | … |
+| MLP (no message passing) | 91.78±6.69 | [[running]] | [[running]] | [[running]] |
+| GCN | 92.44±7.01 | [[running]] | [[running]] | [[running]] |
+| GIN | 92.11±7.21 | [[running]] | [[running]] | [[running]] |
+| GSN (subgraph counting) | 89.67±8.68 | [[running]] | [[running]] | [[running]] |
+| PPGN (baseline) | 88.22±5.84 | [[running]] | [[running]] | [[running]] |
+| **PPGN + PH (ours)** | **89.89±6.73** | [[running]] | [[running]] | [[running]] |
 
-*(MUTAG numbers over 5 seeds ×10 folds; NCI1/NCI109 running. * = still
-accumulating seeds. Full paired stats emitted by `aggregate.py`.)*
+*(MUTAG: 10-fold × 5 seeds = 50 runs / cell. PTC, NCI1, NCI109 currently
+running. Paired stats via `aggregate.py`.)*
 
-Two honest observations, both of which we think strengthen the paper's framing:
-1. **The controlled comparison confirms the claim.** PPGN+PH improves on the
-   matched PPGN baseline (MUTAG +2.1, and with *lower* variance 3.7 vs 5.8);
-   the paired permutation/Wilcoxon tests quantify significance per dataset.
-2. **On MUTAG, all methods — including a message-passing-free MLP — cluster
+**Paired topo − baseline (matched seed × fold, MUTAG):** +1.67%, 95% CI
+[−0.22, +3.67], permutation p = 0.12, Wilcoxon p = 0.18, topo wins 21/50 folds.
+A positive trend but not significant on this saturated 188-graph dataset —
+which is *precisely* the reviewer's concern. We take this seriously and rely
+on the paired tests + the larger, more discriminative datasets ([[NCI1, NCI109
+running]]) for the decisive evidence.
+
+Two honest observations that we think strengthen the paper's framing:
+1. **On MUTAG, all methods — including a message-passing-free MLP — cluster
    within one fold-std of each other.** This is a well-known property of MUTAG
-   (188 graphs, near-saturated) and is exactly the reviewer's point: on these
-   small datasets marginal gaps are uninformative for *every* method, which is
-   why we rely on paired tests and on the larger, more discriminative datasets.
+   (188 graphs; ~19 per validation fold, so a one-graph swing changes accuracy
+   by ~5%). Marginal gaps are uninformative for *every* method on this dataset,
+   which is why we rely on paired tests and larger datasets.
+2. **The controlled paired comparison is positive on MUTAG (+1.67%) and the
+   paper's larger reported gains are on the larger, discriminative datasets
+   (NCI1, NCI109).** Those runs are underway on GPU and will be reported.
 
 **Published same-protocol baselines (standard Xu 10-fold; cited, not re-run).**
 Directly comparable because they use the identical splits/protocol.

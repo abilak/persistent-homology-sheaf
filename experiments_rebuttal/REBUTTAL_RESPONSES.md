@@ -57,15 +57,17 @@ splits/schedule), and we tabulate published numbers under the identical Xu
 protocol for **GSN, CIN and SIN** (topological cellular/simplicial nets), GIN,
 PPGN, and the WL kernel — all directly comparable. See table in REBUTTAL.md.
 
-We are candid about two things. (i) The controlled test confirms the claim:
-adding PH to the matched equivariant backbone helps [[MUTAG +__ , lower
-variance]]. (ii) On MUTAG specifically, all methods — including the
-message-passing-free MLP — cluster within one fold-std, which is a known property
-of MUTAG and reinforces why paired tests and larger datasets are the right
-evidence. Our contribution is expressivity (provably beyond 3-WL) plus a
-controlled demonstration that PH improves an equivariant backbone; it is not a
-SOTA claim, and recent topological/subgraph-counting nets are strong and
-complementary.
+We are candid about two things. (i) On MUTAG the matched paired test gives
+topo − baseline = +1.67% (95% CI [−0.22, +3.67], p = 0.12) — a positive trend
+but not significant on this saturated 188-graph dataset. (ii) All methods,
+including a message-passing-free MLP, cluster within one fold-std on MUTAG,
+which is a well-known property of the dataset (~19 graphs per validation fold)
+and reinforces why paired tests and larger datasets are the right evidence.
+The paper's larger reported gains are on NCI1/NCI109, [[which are underway on
+GPU and will be reported before the rebuttal deadline]]. Our contribution is
+expressivity (provably beyond 3-WL) plus a controlled demonstration that PH
+improves an equivariant backbone; it is not a SOTA claim, and recent
+topological/subgraph-counting nets are strong and complementary.
 
 **On "the SRG separation uses random initialization."** Requiring no training is
 by design, but we agree a single init is not enough. Over 30 seeds the separation
