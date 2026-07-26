@@ -100,6 +100,16 @@ PLANS = {
              # both count- and scale-aware pooling
              ("gm2n0ms", {"topo_gate_bias": -2.0, "topo_node_level": False,
                           "topo_multiplicity": True, "topo_scale_stats": True}),
+             # LEAN: topology only after the last block + narrow vectorization,
+             # cutting the parameter overhead over the PPGN baseline to ~1.4x
+             # (submitted model is 3-4x) while keeping the SRG separation
+             ("lean", {"topo_apply_layers": "last", "topo_node_level": False,
+                       "topo_num_stats": 8, "topo_hidden_dim": 16,
+                       "topo_gate_bias": -2.0}),
+             ("leanms", {"topo_apply_layers": "last", "topo_node_level": False,
+                         "topo_num_stats": 8, "topo_hidden_dim": 16,
+                         "topo_gate_bias": -2.0, "topo_multiplicity": True,
+                         "topo_scale_stats": True}),
          ]]),
 }
 
