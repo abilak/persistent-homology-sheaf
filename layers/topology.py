@@ -329,11 +329,15 @@ class DifferentiablePH(nn.Module):
                 graph_parts.append((weights * embeds).sum(dim=0))
                 if M is not None:
                     N = len(entries)
-                    involve = torch.zeros(N, M, device=device)
+                    # Build the node-involvement mask on the HOST (numpy) and
+                    # transfer once, instead of writing element-by-element into
+                    # a GPU tensor (each such write is a tiny device sync).
+                    involve_np = np.zeros((N, M), dtype=np.float32)
                     for k, (_, ns) in enumerate(entries):
                         for n in ns:
                             if n < M:
-                                involve[k, n] = 1.0
+                                involve_np[k, n] = 1.0
+                    involve = torch.from_numpy(involve_np).to(device)
                     logits_exp = logits.expand(-1, M)
                     masked = logits_exp.masked_fill(involve == 0, float('-inf'))
                     node_w = torch.softmax(masked, dim=0).nan_to_num(0.0)
