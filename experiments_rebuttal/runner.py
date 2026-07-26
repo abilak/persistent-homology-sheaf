@@ -10,7 +10,7 @@ import os, sys, subprocess, time, json, itertools
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-PY = "/Users/abilakanti/Documents/persistent-homology-sheaf/.venv/bin/python"
+PY = os.environ.get("PY", sys.executable)
 RESULTS = os.path.join(ROOT, "rebuttal_results")
 
 
