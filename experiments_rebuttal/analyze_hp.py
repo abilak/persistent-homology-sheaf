@@ -5,10 +5,12 @@ from collections import defaultdict
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULTS = os.path.join(ROOT, "rebuttal_results", "NCI1")
+RESULTS = os.path.join(ROOT, "rebuttal_results")
+# Optional dataset filter as first CLI arg (e.g. "NCI1", "PTC"); default: all.
+DATASET = sys.argv[1] if len(sys.argv) > 1 else "*"
 
 by = defaultdict(list)
-for fp in glob.glob(os.path.join(RESULTS, "*.json")):
+for fp in glob.glob(os.path.join(RESULTS, DATASET, "*.json")):
     if fp.endswith(".log"):
         continue
     name = os.path.basename(fp)[:-5]
