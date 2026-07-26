@@ -208,11 +208,15 @@ class DifferentiablePH(nn.Module):
     vectorization. Uses gudhi for the combinatorial pairing while keeping
     gradient flow through the filtration values. Consumes cached GraphStructs.
     """
-    def __init__(self, max_ph_dim=1, vec_dim=16):
+    def __init__(self, max_ph_dim=1, vec_dim=16, multiplicity=False):
         super().__init__()
         self.max_ph_dim = max_ph_dim
         self.vec_dim = vec_dim
-        self.out_features = (max_ph_dim + 1) * vec_dim
+        # if multiplicity: append log(1 + #persistence-pairs) per dimension, so
+        # the pooling is aware of feature COUNT (which the softmax average loses)
+        self.multiplicity = multiplicity
+        self.per_dim = vec_dim + (1 if multiplicity else 0)
+        self.out_features = (max_ph_dim + 1) * self.per_dim
         self.embeds = nn.ModuleList()
         self.attns = nn.ModuleList()
         for _ in range(max_ph_dim + 1):
@@ -322,16 +326,21 @@ class DifferentiablePH(nn.Module):
             for d in range(self.max_ph_dim + 1):
                 entries = dim_data[d]
                 if len(entries) == 0:
-                    graph_parts.append(torch.zeros(self.vec_dim, device=device))
+                    graph_parts.append(torch.zeros(self.per_dim, device=device))
                     if M is not None:
-                        node_parts.append(torch.zeros(self.vec_dim, M, device=device))
+                        node_parts.append(torch.zeros(self.per_dim, M, device=device))
                     continue
                 bp = torch.stack([e[0] for e in entries])
                 bp = (bp - bp.mean(dim=0)) / (bp.std(dim=0, correction=0) + 1e-8)
                 embeds = self.embeds[d](bp)
                 logits = self.attns[d](bp)
                 weights = torch.softmax(logits, dim=0)
-                graph_parts.append((weights * embeds).sum(dim=0))
+                gpart = (weights * embeds).sum(dim=0)
+                if self.multiplicity:
+                    mult = torch.log1p(torch.tensor(
+                        float(len(entries)), device=device))
+                    gpart = torch.cat([gpart, mult.reshape(1)])
+                graph_parts.append(gpart)
                 if M is not None:
                     N = len(entries)
                     # Build the node-involvement mask on the HOST (numpy) and
@@ -346,7 +355,12 @@ class DifferentiablePH(nn.Module):
                     logits_exp = logits.expand(-1, M)
                     masked = logits_exp.masked_fill(involve == 0, float('-inf'))
                     node_w = torch.softmax(masked, dim=0).nan_to_num(0.0)
-                    node_parts.append(torch.mm(embeds.t(), node_w))
+                    npart = torch.mm(embeds.t(), node_w)          # (vec_dim, M)
+                    if self.multiplicity:
+                        # per-node feature count = #pairs involving each node
+                        node_mult = torch.log1p(involve.sum(dim=0))  # (M,)
+                        npart = torch.cat([npart, node_mult.reshape(1, M)], dim=0)
+                    node_parts.append(npart)
 
             vectors.append(torch.cat(graph_parts))
             if M is not None:
@@ -361,11 +375,11 @@ class TopologyLayer(nn.Module):
     """Full topology branch for one layer: learned filtration -> differentiable
     PH -> broadcast (graph + node level) -> gated residual fusion."""
     def __init__(self, eqv_features, hidden_dim=64, max_ph_dim=1, num_stats=4,
-                 gate_bias=2.0, node_level=True):
+                 gate_bias=2.0, node_level=True, multiplicity=False):
         super().__init__()
         self.node_level = node_level
         self.filtration = LearnedFiltration(eqv_features, hidden_dim)
-        self.ph = DifferentiablePH(max_ph_dim, num_stats)
+        self.ph = DifferentiablePH(max_ph_dim, num_stats, multiplicity=multiplicity)
 
         topo_dim = self.ph.out_features
         self.topo_norm = nn.LayerNorm(topo_dim)

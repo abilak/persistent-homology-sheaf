@@ -65,6 +65,11 @@ PLANS = {
              ("gm2n1", {"topo_gate_bias": -2.0, "topo_node_level": True}),
              ("g0n0", {"topo_gate_bias": 0.0, "topo_node_level": False}),  # faster
              ("gm2n0", {"topo_gate_bias": -2.0, "topo_node_level": False}),
+             # multiplicity: same as gm2n0 but pooling aware of feature count
+             ("gm2n0mult", {"topo_gate_bias": -2.0, "topo_node_level": False,
+                            "topo_multiplicity": True}),
+             ("g0n0mult", {"topo_gate_bias": 0.0, "topo_node_level": False,
+                           "topo_multiplicity": True}),
          ]]),
 }
 
