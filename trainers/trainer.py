@@ -1,9 +1,16 @@
 # import tensorflow as tf
+import os
 from tqdm import tqdm
 import numpy as np
 import torch
 import torch.optim
 from utils import doc_utils
+
+# Progress bars are noise when jobs are run in batch (they bloat the per-job
+# logs and cost I/O). Disabled unless stdout is a terminal; force with
+# QUIET=0 / disable with QUIET=1.
+_QUIET_ENV = os.environ.get('QUIET')
+QUIET = (_QUIET_ENV == '1') if _QUIET_ENV is not None else (not os.isatty(1))
 
 
 class Trainer(object):
@@ -64,7 +71,7 @@ class Trainer(object):
 
         # initialize tqdm
         tt = tqdm(range(self.data_loader.num_iterations_train), total=self.data_loader.num_iterations_train,
-                  desc="Epoch-{}-".format(num_epoch))
+                  desc="Epoch-{}-".format(num_epoch), disable=QUIET)
 
         total_loss = 0.
         total_correct_labels_or_distances = 0.
@@ -83,7 +90,8 @@ class Trainer(object):
         loss_per_epoch = total_loss/self.data_loader.train_size
         if not self.is_QM9:
             acc_per_epoch = total_correct_labels_or_distances/self.data_loader.train_size
-            print("\t\tEpoch-{}  loss:{:.4f} -- acc:{:.4f}\n".format(num_epoch, loss_per_epoch, acc_per_epoch))
+            if not QUIET:
+                print("\t\tEpoch-{}  loss:{:.4f} -- acc:{:.4f}\n".format(num_epoch, loss_per_epoch, acc_per_epoch))
             return acc_per_epoch, loss_per_epoch
         else:
             dist_per_epoch = (total_correct_labels_or_distances * self.data_loader.labels_std)/self.data_loader.train_size
@@ -121,17 +129,18 @@ class Trainer(object):
         total_loss = 0.
         total_correct_or_dist = 0.
 
-        # Iterate over batches
-        # for cur_it in tt:
-        for cur_it in range(self.data_loader.num_iterations_val):
-            # One Train step on the current batch
-            graph, label = self.data_loader.next_batch()
-            # label = np.expand_dims(label, 0)
-            loss, correct_or_dist = self.model_wrapper.run_model_get_loss_and_results(graph, label)
+        # Iterate over batches. No autograd during validation: the backward
+        # graph is never used here, and for the topology branch retaining it
+        # is expensive in both time and memory.
+        with torch.no_grad():
+            for cur_it in range(self.data_loader.num_iterations_val):
+                graph, label = self.data_loader.next_batch()
+                loss, correct_or_dist = \
+                    self.model_wrapper.run_model_get_loss_and_results(graph, label)
 
-            # update metrics returned from train_step func
-            total_loss += loss.cpu().item()
-            total_correct_or_dist += correct_or_dist
+                # update metrics returned from train_step func
+                total_loss += loss.cpu().item()
+                total_correct_or_dist += correct_or_dist
 
         # tt.close()
 
@@ -168,20 +177,19 @@ class Trainer(object):
 
         # initialize tqdm
         tt = tqdm(range(self.data_loader.num_iterations_test), total=self.data_loader.num_iterations_test,
-                  desc="Test-{}-".format(self.best_epoch))
+                  desc="Test-{}-".format(self.best_epoch), disable=QUIET)
 
         total_loss = 0.
         total_dists = 0.
 
-        # Iterate over batches
-        for cur_it in tt:
-            # One Train step on the current batch
-            graph, label = self.data_loader.next_batch()
-            # label = np.expand_dims(label, 0)
-            loss, dists = self.model_wrapper.run_model_get_loss_and_results(graph, label)
-            # update metrics returned from train_step func
-            total_loss += loss.cpu().item()
-            total_dists += dists
+        # Iterate over batches (no autograd needed at test time)
+        with torch.no_grad():
+            for cur_it in tt:
+                graph, label = self.data_loader.next_batch()
+                loss, dists = self.model_wrapper.run_model_get_loss_and_results(graph, label)
+                # update metrics returned from train_step func
+                total_loss += loss.cpu().item()
+                total_dists += dists
 
         test_loss = total_loss/self.data_loader.test_size
         test_dists = (total_dists*self.data_loader.labels_std) / self.data_loader.test_size

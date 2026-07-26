@@ -74,7 +74,7 @@ class GraphStruct:
     """Cached, graph-only structure for the topology branch (device-agnostic
     index tensors are materialized lazily per device)."""
     __slots__ = ("simplices_list", "simplex_to_idx", "S", "M",
-                 "f_i_cpu", "f_j_cpu", "f_seg_cpu", "f_counts_cpu",
+                 "f_flat_cpu", "f_seg_cpu", "f_counts_cpu",
                  "face_tables_cpu", "_dev_cache")
 
     def __init__(self, adj, max_dim):
@@ -90,24 +90,26 @@ class GraphStruct:
                                for i, s in enumerate(simplices_list)}
         self.S = len(simplices_list)
 
-        # gather/scatter indices for f(sigma)=rho(mean_{(i,j) in sigmaxsigma} X_ij)
-        f_i, f_j, f_seg, f_counts = [], [], [], []
+        # gather/scatter indices for f(sigma)=rho(mean_{(i,j) in sigmaxsigma} X_ij).
+        # Pair positions are stored FLAT (i*M + j) so a whole batch can be
+        # gathered with one index into a (B*M*M, d) view.
+        f_flat, f_seg, f_counts = [], [], []
         for s_idx, sigma in enumerate(simplices_list):
             f_counts.append(len(sigma) * len(sigma))
             for i in sigma:
                 for j in sigma:
-                    f_i.append(i); f_j.append(j); f_seg.append(s_idx)
-        self.f_i_cpu = torch.tensor(f_i, dtype=torch.long)
-        self.f_j_cpu = torch.tensor(f_j, dtype=torch.long)
+                    f_flat.append(i * M + j); f_seg.append(s_idx)
+        self.f_flat_cpu = torch.tensor(f_flat, dtype=torch.long)
         self.f_seg_cpu = torch.tensor(f_seg, dtype=torch.long)
         self.f_counts_cpu = torch.tensor(f_counts, dtype=torch.float32)
 
         # face-index tables for the differentiable non-decreasing correction,
-        # grouped by dimension (ascending), enumeration matching the reference.
+        # keyed BY DIMENSION so tables can be concatenated across a batch
+        # (enumeration matches the reference implementation).
         by_dim = defaultdict(list)
         for idx, sigma in enumerate(simplices_list):
             by_dim[len(sigma) - 1].append(idx)
-        face_tables = []
+        face_tables = {}
         max_d = max(by_dim.keys()) if by_dim else 0
         for dim in range(1, max_d + 1):
             sim_idx_list = by_dim.get(dim, [])
@@ -121,19 +123,20 @@ class GraphStruct:
                     for face in combinations(sigma, k):
                         row.append(self.simplex_to_idx[tuple(sorted(face))])
                 face_rows.append(row)
-            face_tables.append((torch.tensor(sim_idx_list, dtype=torch.long),
-                                torch.tensor(face_rows, dtype=torch.long)))
+            face_tables[dim] = (torch.tensor(sim_idx_list, dtype=torch.long),
+                                torch.tensor(face_rows, dtype=torch.long))
         self.face_tables_cpu = face_tables
         self._dev_cache = {}
 
     def on(self, device):
-        """Return (f_i,f_j,f_seg,f_counts,face_tables) on the given device."""
+        """Return (f_flat, f_seg, f_counts, face_tables{dim:(sim,face)})."""
         key = str(device)
         if key not in self._dev_cache:
-            ft = [(a.to(device), b.to(device)) for a, b in self.face_tables_cpu]
+            ft = {d: (a.to(device), b.to(device))
+                  for d, (a, b) in self.face_tables_cpu.items()}
             self._dev_cache[key] = (
-                self.f_i_cpu.to(device), self.f_j_cpu.to(device),
-                self.f_seg_cpu.to(device), self.f_counts_cpu.to(device), ft)
+                self.f_flat_cpu.to(device), self.f_seg_cpu.to(device),
+                self.f_counts_cpu.to(device), ft)
         return self._dev_cache[key]
 
 
@@ -183,21 +186,71 @@ class LearnedFiltration(nn.Module):
             structs: list of B GraphStruct
         Returns:
             list of B (struct, filtration_values_tensor[S])
+
+        The whole batch is processed with ONE gather, ONE segment-sum and ONE
+        MLP call (instead of ~6 kernel launches per graph), which is what makes
+        this cheap on GPU. Graphs are grouped by node count upstream, so every
+        struct in the batch shares M and can index a flat (B*M*M, d) view.
         """
         B, d, M, _ = pair_features.shape
         device = pair_features.device
+
+        flat_list, seg_list, cnt_list, sizes = [], [], [], []
+        seg_off = 0
+        for b, st in enumerate(structs):
+            if st.S == 0 or st.M != M:
+                sizes.append(0 if st.S == 0 else -1)  # -1 => per-graph fallback
+                continue
+            f_flat, f_seg, f_counts, _ = st.on(device)
+            flat_list.append(f_flat + b * M * M)
+            seg_list.append(f_seg + seg_off)
+            cnt_list.append(f_counts)
+            seg_off += st.S
+            sizes.append(st.S)
+
+        if any(s == -1 for s in sizes):        # mismatched sizes: safe path
+            return self._forward_per_graph(pair_features, structs)
+
+        out = [None] * B
+        if seg_off == 0:
+            return [(st, torch.zeros(0, device=device)) for st in structs]
+
+        flat_idx = torch.cat(flat_list)
+        seg_idx = torch.cat(seg_list)
+        counts = torch.cat(cnt_list)
+
+        pf = pair_features.permute(0, 2, 3, 1).reshape(B * M * M, d)
+        pair_vals = pf[flat_idx]                                   # (P_tot, d)
+        sums = torch.zeros(seg_off, d, device=device, dtype=pair_vals.dtype)
+        sums = sums.index_add(0, seg_idx, pair_vals)
+        means = sums / counts.unsqueeze(-1)
+        vals = self.mlp(means).squeeze(-1)                         # (S_tot,)
+
+        cursor = 0
+        for b, st in enumerate(structs):
+            s = sizes[b]
+            if s == 0:
+                out[b] = (st, torch.zeros(0, device=device))
+            else:
+                out[b] = (st, vals[cursor:cursor + s])
+                cursor += s
+        return out
+
+    def _forward_per_graph(self, pair_features, structs):
+        """Fallback for batches whose graphs differ in node count."""
+        B, d, M, _ = pair_features.shape
+        device = pair_features.device
         out = []
-        for b in range(B):
-            st = structs[b]
+        for b, st in enumerate(structs):
             if st.S == 0:
                 out.append((st, torch.zeros(0, device=device)))
                 continue
-            f_i, f_j, f_seg, f_counts, _ = st.on(device)
-            pair_vals = pair_features[b][:, f_i, f_j].transpose(0, 1)  # (P, d)
+            f_flat, f_seg, f_counts, _ = st.on(device)
+            pf = pair_features[b].permute(1, 2, 0).reshape(st.M * st.M, d)
+            pair_vals = pf[f_flat]
             sums = torch.zeros(st.S, d, device=device, dtype=pair_vals.dtype)
             sums = sums.index_add(0, f_seg, pair_vals)
-            means = sums / f_counts.unsqueeze(-1)
-            vals = self.mlp(means).squeeze(-1)  # (S,)
+            vals = self.mlp(sums / f_counts.unsqueeze(-1)).squeeze(-1)
             out.append((st, vals))
         return out
 
@@ -252,20 +305,41 @@ class DifferentiablePH(nn.Module):
                              device=device) if num_nodes else None
             return gv, nv
 
-        # Phase 1 (GPU, no host sync): compute the non-decreasing-corrected
-        # filtration for every graph. Then transfer ALL of them to the host in
-        # a SINGLE sync (concatenate -> one .cpu()), instead of one sync per
-        # graph -- this is what keeps the GPU pipeline from stalling.
-        adj_list = []
+        # Phase 1 (GPU, no host sync): non-decreasing-correct the filtration for
+        # the WHOLE batch at once. Filtration vectors are concatenated and the
+        # per-graph face tables are merged per dimension with index offsets, so
+        # the correction costs a few kernels for the batch rather than ~3 per
+        # graph. Faces of a simplex always live in the same graph, so offsetting
+        # keeps the computation identical to doing it graph by graph.
+        offsets, cat_parts = [], []
+        off = 0
         for st, filt_tensor in filt_batch:
             if st.S == 0:
-                adj_list.append(None)
+                offsets.append(None)
                 continue
-            _, _, _, _, face_tables = st.on(device)
-            adj_list.append(self._make_non_decreasing(filt_tensor, face_tables))
-        nonempty = [a for a in adj_list if a is not None]
-        if nonempty:
-            flat_vals = torch.cat(nonempty).detach().cpu().tolist()
+            offsets.append(off)
+            cat_parts.append(filt_tensor)
+            off += st.S
+
+        adj_list = [None] * len(filt_batch)
+        if cat_parts:
+            vals_cat = torch.cat(cat_parts)
+            dim_sim, dim_face = defaultdict(list), defaultdict(list)
+            for (st, _), o in zip(filt_batch, offsets):
+                if o is None:
+                    continue
+                _, _, _, ftabs = st.on(device)
+                for dmn, (sim_t, face_t) in ftabs.items():
+                    dim_sim[dmn].append(sim_t + o)
+                    dim_face[dmn].append(face_t + o)
+            batched_tables = [(torch.cat(dim_sim[dd]), torch.cat(dim_face[dd]))
+                              for dd in sorted(dim_sim)]
+            adjusted_cat = self._make_non_decreasing(vals_cat, batched_tables)
+            # ONE host transfer for the whole batch (no per-graph sync)
+            flat_vals = adjusted_cat.detach().cpu().tolist()
+            for bi, ((st, _), o) in enumerate(zip(filt_batch, offsets)):
+                if o is not None:
+                    adj_list[bi] = adjusted_cat[o:o + st.S]
         cursor = 0
 
         vectors, node_vectors = [], []
