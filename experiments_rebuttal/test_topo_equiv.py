@@ -1,13 +1,21 @@
 """Verify optimized topology.py is numerically identical to the original
 reference, and preserves permutation equivariance. Compares TopologyLayer
 outputs (fwd + grad) with shared weights on random graphs."""
-import os, sys, importlib.util
+import os, sys, subprocess, importlib.util
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np, torch
 
-# reference (original) module
-spec = importlib.util.spec_from_file_location("topo_ref", "/tmp/topology_ref.py")
+# Reference = the ORIGINAL topology.py from origin/topology-v4-wkpi. Fetch it
+# from git if not already extracted, so this test is self-bootstrapping.
+REF = "/tmp/topology_ref.py"
+if not os.path.exists(REF):
+    with open(REF, "w") as f:
+        subprocess.check_call(
+            ["git", "show", "origin/topology-v4-wkpi:layers/topology.py"],
+            stdout=f)
+
+spec = importlib.util.spec_from_file_location("topo_ref", REF)
 ref = importlib.util.module_from_spec(spec); spec.loader.exec_module(ref)
 import layers.topology as fast
 
