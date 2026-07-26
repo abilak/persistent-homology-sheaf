@@ -22,8 +22,8 @@ import utils.config as C
 ARCH = {
     'MUTAG':      dict(block=[64, 64], batch=20),
     'PTC':        dict(block=[32, 32], batch=16),
-    'NCI1':       dict(block=[64, 64], batch=32),
-    'NCI109':     dict(block=[64, 64], batch=32),
+    'NCI1':       dict(block=[64, 64], batch=64),   # larger batch: better GPU util
+    'NCI109':     dict(block=[64, 64], batch=64),
     'PROTEINS':   dict(block=[64, 64], batch=16),
     'IMDBBINARY': dict(block=[64, 64], batch=32),
 }
