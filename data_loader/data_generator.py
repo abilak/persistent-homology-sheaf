@@ -1,5 +1,6 @@
 import data_loader.data_helper as helper
 import utils.config
+import numpy as np
 import torch
 
 from utils.device import get_device
@@ -68,7 +69,12 @@ class DataGenerator:
 
     def next_batch(self):
         graphs, labels = next(self.iter)
-        graphs, labels = torch.tensor(graphs, device=DEVICE, dtype=torch.float32), torch.tensor(labels, device=DEVICE, dtype=self.labels_dtype)
+        if not torch.is_tensor(graphs):
+            graphs = torch.from_numpy(np.ascontiguousarray(
+                graphs, dtype=np.float32)).to(DEVICE, non_blocking=True)
+        if not torch.is_tensor(labels):
+            labels = torch.as_tensor(np.asarray(labels), dtype=self.labels_dtype
+                                     ).to(DEVICE, non_blocking=True)
         return graphs, labels
 
     # initialize an iterator from the data for one training epoch
@@ -82,16 +88,47 @@ class DataGenerator:
         else:
             raise ValueError("what_set should be either 'train', 'val' or 'test'")
 
+    def _ensure_train_blocks(self):
+        """Group the training graphs by node count ONCE.
+
+        The grouping is a property of the dataset, not of the epoch, but the
+        original implementation recomputed it (sorting + concatenating every
+        graph) on every call to reshuffle_data -- ~1.4 s/epoch on NCI1, which
+        was comparable to the epoch's compute. We build the contiguous
+        same-size blocks a single time and then only permute indices per epoch.
+        """
+        if getattr(self, '_train_blocks', None) is not None:
+            return
+        graphs, labels = helper.group_same_size(self.train_graphs,
+                                                self.train_labels)
+        self._train_blocks = [np.ascontiguousarray(g, dtype=np.float32)
+                              for g in graphs]
+        self._train_block_labels = [np.asarray(l) for l in labels]
+
     def reshuffle_data(self):
         """
-        Reshuffle train data between epochs
+        Reshuffle train data between epochs.
+
+        Same semantics as before (shuffle within each same-size group, split
+        into batches, then shuffle batch order) but batches are described by
+        (block, row indices) and materialized lazily in next_batch, so no full
+        copy of the training set is made per epoch.
         """
-        graphs, labels = helper.group_same_size(self.train_graphs, self.train_labels)
-        graphs, labels = helper.shuffle_same_size(graphs, labels)
-        graphs, labels = helper.split_to_batches(graphs, labels, self.batch_size)
-        self.num_iterations_train = len(graphs)
-        graphs, labels = helper.shuffle(graphs, labels)
-        self.iter = zip(graphs, labels)
+        self._ensure_train_blocks()
+        batches = []
+        for bi, block in enumerate(self._train_blocks):
+            n = block.shape[0]
+            perm = np.random.permutation(n)
+            for s in range(0, n, self.batch_size):
+                batches.append((bi, perm[s:s + self.batch_size]))
+        order = np.random.permutation(len(batches))
+        batches = [batches[i] for i in order]
+        self.num_iterations_train = len(batches)
+        self.iter = self._iter_batches(batches)
+
+    def _iter_batches(self, batches):
+        for bi, idx in batches:
+            yield self._train_blocks[bi][idx], self._train_block_labels[bi][idx]
 
     def split_val_test_to_batches(self):
         # Split the val and test sets to batchs, no shuffling is needed
