@@ -39,6 +39,29 @@ PLANS = {
                   for s in [0, 1]
                   for m in ["baseline", "topo"]
                   for f in range(1, 11)],
+    # LEAN topology configs. The submitted model triples-to-quadruples the
+    # parameter count over the PPGN baseline (PTC: 50,730 vs 12,004 on 310
+    # training graphs), which is the most likely reason topology *hurts* on the
+    # small TU sets. These variants cut that overhead to ~1.4x while preserving
+    # the SRG separation (verified): topology only after the last equivariant
+    # block, graph-level features only, narrow vectorization, gate off at init.
+    "lean_small": [dict(dataset=ds, model="topo", seed=s, fold=f, epochs=None,
+                        variant=vn, overrides=ov)
+                   for ds in ["MUTAG", "PTC"]
+                   for s in [0, 1, 2]
+                   for f in range(1, 11)
+                   for vn, ov in [
+                       ("lean", {"topo_apply_layers": "last",
+                                 "topo_node_level": False,
+                                 "topo_num_stats": 8, "topo_hidden_dim": 16,
+                                 "topo_gate_bias": -2.0}),
+                       ("leanms", {"topo_apply_layers": "last",
+                                   "topo_node_level": False,
+                                   "topo_num_stats": 8, "topo_hidden_dim": 16,
+                                   "topo_gate_bias": -2.0,
+                                   "topo_multiplicity": True,
+                                   "topo_scale_stats": True}),
+                   ]],
     "big_heavy_nci1": [dict(dataset="NCI1", model=m, seed=s, fold=f, epochs=None)
                        for s in [0, 1]
                        for m in ["baseline", "topo"]

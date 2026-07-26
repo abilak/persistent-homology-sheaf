@@ -20,6 +20,21 @@ class BaseModel(nn.Module):
         # Topology config (disabled by default for backward compat)
         self.use_topology = getattr(config.architecture, 'use_topology', False)
 
+        # Which blocks get a topology branch. 'all' (default) reproduces the
+        # submitted model; 'last' attaches it only after the final equivariant
+        # block. 'last' costs far fewer parameters -- the fusion/gate 1x1 convs
+        # dominate the topology branch -- which matters a lot on small TU
+        # datasets, and it preserves the expressivity result, since a single
+        # PH layer already separates the strongly-regular pairs.
+        apply_layers = getattr(config.architecture, 'topo_apply_layers', 'all')
+        n_blocks = len(block_features)
+        if apply_layers == 'last':
+            topo_at = {n_blocks - 1}
+        elif apply_layers == 'first':
+            topo_at = {0}
+        else:
+            topo_at = set(range(n_blocks))
+
         # First part - sequential equivariant blocks + optional topology
         last_layer_features = original_features_num
         self.reg_blocks = nn.ModuleList()
@@ -27,7 +42,9 @@ class BaseModel(nn.Module):
         for layer, next_layer_features in enumerate(block_features):
             mlp_block = modules.RegularBlock(config, last_layer_features, next_layer_features)
             self.reg_blocks.append(mlp_block)
-            if self.use_topology:
+            if self.use_topology and layer not in topo_at:
+                self.topo_layers.append(nn.Identity())   # placeholder, no params
+            elif self.use_topology:
                 topo_hidden = getattr(config.architecture, 'topo_hidden_dim', 64)
                 topo_ph_dim = getattr(config.architecture, 'topo_max_ph_dim', 1)
                 topo_stats = getattr(config.architecture, 'topo_num_stats', 4)
@@ -83,7 +100,7 @@ class BaseModel(nn.Module):
             x = block(x)
 
             # Steps 2-5: topology (filtration on X^(l+1/2) -> PH -> broadcast -> fuse)
-            if self.use_topology:
+            if self.use_topology and not isinstance(self.topo_layers[i], nn.Identity):
                 x = self.topo_layers[i](x, simplices_batch)
 
             if self.config.architecture.new_suffix:
