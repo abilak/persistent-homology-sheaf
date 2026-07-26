@@ -1,0 +1,247 @@
+[
+  {
+    "pair": "Rook(4,4) vs Shrikhande",
+    "params": [
+      16,
+      6,
+      2,
+      2
+    ],
+    "cliques_G1": {
+      "1": 16,
+      "2": 48,
+      "3": 32,
+      "4": 8,
+      "5": 0
+    },
+    "cliques_G2": {
+      "1": 16,
+      "2": 48,
+      "3": 32,
+      "4": 0,
+      "5": 0
+    },
+    "counts_equal": false,
+    "betti_G1": [
+      1,
+      9,
+      0,
+      0
+    ],
+    "betti_G2": [
+      1,
+      2,
+      1
+    ],
+    "betti_equal": false,
+    "baseline_sep_median": 0.0,
+    "baseline_sep_max": 9.313225746154785e-10,
+    "topo_sep_median": 0.11920919269323349,
+    "topo_sep_max": 0.18724942207336426
+  },
+  {
+    "pair": "T(8) vs Chang_1",
+    "params": [
+      28,
+      12,
+      6,
+      4
+    ],
+    "cliques_G1": {
+      "1": 28,
+      "2": 168,
+      "3": 336,
+      "4": 280,
+      "5": 168
+    },
+    "cliques_G2": {
+      "1": 28,
+      "2": 168,
+      "3": 336,
+      "4": 248,
+      "5": 72
+    },
+    "counts_equal": false,
+    "betti_G1": [
+      1,
+      0,
+      35,
+      120
+    ],
+    "betti_G2": [
+      1,
+      0,
+      11,
+      64
+    ],
+    "betti_equal": false,
+    "baseline_sep_median": 0.0,
+    "baseline_sep_max": 4.656612873077393e-10,
+    "topo_sep_median": 0.0017675012350082397,
+    "topo_sep_max": 0.21363551914691925
+  },
+  {
+    "pair": "T(8) vs Chang_2",
+    "params": [
+      28,
+      12,
+      6,
+      4
+    ],
+    "cliques_G1": {
+      "1": 28,
+      "2": 168,
+      "3": 336,
+      "4": 280,
+      "5": 168
+    },
+    "cliques_G2": {
+      "1": 28,
+      "2": 168,
+      "3": 336,
+      "4": 240,
+      "5": 48
+    },
+    "counts_equal": false,
+    "betti_G1": [
+      1,
+      0,
+      35,
+      120
+    ],
+    "betti_G2": [
+      1,
+      0,
+      4,
+      49
+    ],
+    "betti_equal": false,
+    "baseline_sep_median": 0.0,
+    "baseline_sep_max": 2.3283064365386963e-10,
+    "topo_sep_median": 0.03537590801715851,
+    "topo_sep_max": 0.07038317620754242
+  },
+  {
+    "pair": "T(8) vs Chang_3",
+    "params": [
+      28,
+      12,
+      6,
+      4
+    ],
+    "cliques_G1": {
+      "1": 28,
+      "2": 168,
+      "3": 336,
+      "4": 280,
+      "5": 168
+    },
+    "cliques_G2": {
+      "1": 28,
+      "2": 168,
+      "3": 336,
+      "4": 240,
+      "5": 48
+    },
+    "counts_equal": false,
+    "betti_G1": [
+      1,
+      0,
+      35,
+      120
+    ],
+    "betti_G2": [
+      1,
+      0,
+      0,
+      45
+    ],
+    "betti_equal": false,
+    "baseline_sep_median": 0.0,
+    "baseline_sep_max": 4.656612873077393e-10,
+    "topo_sep_median": 0.006188556551933289,
+    "topo_sep_max": 0.1279919147491455
+  },
+  {
+    "pair": "Paley(25) vs L3(5)",
+    "params": [
+      25,
+      12,
+      5,
+      6
+    ],
+    "cliques_G1": {
+      "1": 25,
+      "2": 150,
+      "3": 250,
+      "4": 75,
+      "5": 15
+    },
+    "cliques_G2": {
+      "1": 25,
+      "2": 150,
+      "3": 250,
+      "4": 79,
+      "5": 15
+    },
+    "counts_equal": false,
+    "betti_G1": [
+      1,
+      0,
+      64,
+      15
+    ],
+    "betti_G2": [
+      1,
+      0,
+      60,
+      15
+    ],
+    "betti_equal": false,
+    "baseline_sep_median": 0.0,
+    "baseline_sep_max": 4.656612873077393e-10,
+    "topo_sep_median": 0.003124609589576721,
+    "topo_sep_max": 0.1073126271367073
+  },
+  {
+    "pair": "Paley(49) vs Peisert(49)",
+    "params": [
+      49,
+      24,
+      11,
+      12
+    ],
+    "cliques_G1": {
+      "1": 49,
+      "2": 588,
+      "3": 2156,
+      "4": 2450,
+      "5": 882
+    },
+    "cliques_G2": {
+      "1": 49,
+      "2": 588,
+      "3": 2156,
+      "4": 2156,
+      "5": 588
+    },
+    "counts_equal": false,
+    "betti_G1": [
+      1,
+      0,
+      0,
+      834
+    ],
+    "betti_G2": [
+      1,
+      0,
+      54,
+      594
+    ],
+    "betti_equal": false,
+    "baseline_sep_median": 0.0,
+    "baseline_sep_max": 0.0,
+    "topo_sep_median": 0.0011829286813735962,
+    "topo_sep_max": 0.11306332796812057
+  }
+]

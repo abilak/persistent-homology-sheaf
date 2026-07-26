@@ -12,7 +12,8 @@ class Trainer(object):
         self.best_val_loss = np.inf
         self.best_epoch = -1
         self.cur_epoch = 0
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        from utils.device import get_device
+        self.device = get_device()
 
         self.model_wrapper = model_wrapper
         self.config = config

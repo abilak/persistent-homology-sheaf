@@ -2,7 +2,8 @@ import data_loader.data_helper as helper
 import utils.config
 import torch
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+from utils.device import get_device
+DEVICE = get_device()
 
 
 class DataGenerator:

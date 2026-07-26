@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import layers.layers as layers
 import layers.modules as modules
-from layers.topology import TopologyLayer, build_clique_complex
+from layers.topology import TopologyLayer, build_graph_structs
 
 
 class BaseModel(nn.Module):
@@ -54,10 +54,11 @@ class BaseModel(nn.Module):
             self.fc_layers.append(modules.FullyConnected(256, self.config.num_classes, activation_fn=None))
 
     def _build_simplicial_complexes(self, input):
-        """Extract adjacency from channel 0 and build clique complexes per graph."""
+        """Extract adjacency from channel 0 and build (cached) clique-complex
+        structures per graph."""
         adj_batch = input[:, 0, :, :].detach().cpu().numpy()
         max_dim = getattr(self.config.architecture, 'topo_max_simplex_dim', 2)
-        return [build_clique_complex(adj, max_dim=max_dim) for adj in adj_batch]
+        return build_graph_structs(adj_batch, max_dim=max_dim)
 
     def forward(self, input):
         x = input

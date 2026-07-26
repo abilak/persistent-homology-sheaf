@@ -4,14 +4,20 @@ import torch
 import torch.nn.functional as F
 from models.base_model import BaseModel
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+from utils.device import get_device
+DEVICE = get_device()
 
 
 class ModelWrapper(object):
     def __init__(self, config, data):
         self.config = config
         self.data = data
-        self.model = BaseModel(config).to(DEVICE)
+        baseline_type = getattr(config.architecture, 'baseline_type', None)
+        if baseline_type is not None:
+            from models.baseline_models import BaselineModel
+            self.model = BaselineModel(config).to(DEVICE)
+        else:
+            self.model = BaseModel(config).to(DEVICE)
 
     # save function that saves the checkpoint in the path defined in the config file
     def save(self, best: bool, epoch: int, optimizer: torch.optim.Optimizer):
