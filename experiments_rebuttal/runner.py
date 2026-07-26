@@ -70,6 +70,13 @@ PLANS = {
                             "topo_multiplicity": True}),
              ("g0n0mult", {"topo_gate_bias": 0.0, "topo_node_level": False,
                            "topo_multiplicity": True}),
+             # scale_stats: restore the absolute filtration scale that the
+             # per-graph standardization removes (paper credits it for v2>v1)
+             ("gm2n0sc", {"topo_gate_bias": -2.0, "topo_node_level": False,
+                          "topo_scale_stats": True}),
+             # both count- and scale-aware pooling
+             ("gm2n0ms", {"topo_gate_bias": -2.0, "topo_node_level": False,
+                          "topo_multiplicity": True, "topo_scale_stats": True}),
          ]]),
 }
 

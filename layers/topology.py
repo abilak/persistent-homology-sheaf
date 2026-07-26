@@ -261,15 +261,25 @@ class DifferentiablePH(nn.Module):
     vectorization. Uses gudhi for the combinatorial pairing while keeping
     gradient flow through the filtration values. Consumes cached GraphStructs.
     """
-    def __init__(self, max_ph_dim=1, vec_dim=16, multiplicity=False):
+    def __init__(self, max_ph_dim=1, vec_dim=16, multiplicity=False,
+                 scale_stats=False):
         super().__init__()
         self.max_ph_dim = max_ph_dim
         self.vec_dim = vec_dim
-        # if multiplicity: append log(1 + #persistence-pairs) per dimension, so
-        # the pooling is aware of feature COUNT (which the softmax average loses)
+        # multiplicity: append log(1 + #persistence-pairs) per dimension, so the
+        # pooling is aware of feature COUNT (which the softmax average loses).
         self.multiplicity = multiplicity
-        self.per_dim = vec_dim + (1 if multiplicity else 0)
-        self.out_features = (max_ph_dim + 1) * self.per_dim
+        # scale_stats: the (birth, persistence) pairs are standardized per graph
+        # and dimension before embedding, which stabilizes training but discards
+        # the ABSOLUTE filtration scale. When enabled we append that scale back
+        # explicitly as 4 permutation-invariant statistics
+        # (mean/std of birth, mean/std of persistence) at the graph level.
+        self.scale_stats = scale_stats
+        extra = (1 if multiplicity else 0)
+        self.per_dim_node = vec_dim + extra
+        self.per_dim_graph = self.per_dim_node + (4 if scale_stats else 0)
+        self.out_features = (max_ph_dim + 1) * self.per_dim_graph
+        self.node_out_features = (max_ph_dim + 1) * self.per_dim_node
         self.embeds = nn.ModuleList()
         self.attns = nn.ModuleList()
         for _ in range(max_ph_dim + 1):
@@ -301,7 +311,7 @@ class DifferentiablePH(nn.Module):
         B = len(filt_batch)
         if not GUDHI_AVAILABLE:
             gv = torch.zeros(B, self.out_features, device=device)
-            nv = torch.zeros(B, self.out_features, num_nodes,
+            nv = torch.zeros(B, self.node_out_features, num_nodes,
                              device=device) if num_nodes else None
             return gv, nv
 
@@ -350,7 +360,7 @@ class DifferentiablePH(nn.Module):
             if st.S == 0:
                 vectors.append(torch.zeros(self.out_features, device=device))
                 if num_nodes is not None:
-                    node_vectors.append(torch.zeros(self.out_features,
+                    node_vectors.append(torch.zeros(self.node_out_features,
                                                     num_nodes, device=device))
                 continue
 
@@ -400,12 +410,15 @@ class DifferentiablePH(nn.Module):
             for d in range(self.max_ph_dim + 1):
                 entries = dim_data[d]
                 if len(entries) == 0:
-                    graph_parts.append(torch.zeros(self.per_dim, device=device))
+                    graph_parts.append(
+                        torch.zeros(self.per_dim_graph, device=device))
                     if M is not None:
-                        node_parts.append(torch.zeros(self.per_dim, M, device=device))
+                        node_parts.append(
+                            torch.zeros(self.per_dim_node, M, device=device))
                     continue
-                bp = torch.stack([e[0] for e in entries])
-                bp = (bp - bp.mean(dim=0)) / (bp.std(dim=0, correction=0) + 1e-8)
+                bp_raw = torch.stack([e[0] for e in entries])
+                bp = ((bp_raw - bp_raw.mean(dim=0))
+                      / (bp_raw.std(dim=0, correction=0) + 1e-8))
                 embeds = self.embeds[d](bp)
                 logits = self.attns[d](bp)
                 weights = torch.softmax(logits, dim=0)
@@ -414,6 +427,12 @@ class DifferentiablePH(nn.Module):
                     mult = torch.log1p(torch.tensor(
                         float(len(entries)), device=device))
                     gpart = torch.cat([gpart, mult.reshape(1)])
+                if self.scale_stats:
+                    # absolute scale removed by the standardization above,
+                    # reinstated as invariant statistics of the raw diagram
+                    stats = torch.cat([bp_raw.mean(dim=0),
+                                       bp_raw.std(dim=0, correction=0)])  # (4,)
+                    gpart = torch.cat([gpart, stats])
                 graph_parts.append(gpart)
                 if M is not None:
                     N = len(entries)
@@ -449,19 +468,23 @@ class TopologyLayer(nn.Module):
     """Full topology branch for one layer: learned filtration -> differentiable
     PH -> broadcast (graph + node level) -> gated residual fusion."""
     def __init__(self, eqv_features, hidden_dim=64, max_ph_dim=1, num_stats=4,
-                 gate_bias=2.0, node_level=True, multiplicity=False):
+                 gate_bias=2.0, node_level=True, multiplicity=False,
+                 scale_stats=False):
         super().__init__()
         self.node_level = node_level
         self.filtration = LearnedFiltration(eqv_features, hidden_dim)
-        self.ph = DifferentiablePH(max_ph_dim, num_stats, multiplicity=multiplicity)
+        self.ph = DifferentiablePH(max_ph_dim, num_stats,
+                                   multiplicity=multiplicity,
+                                   scale_stats=scale_stats)
 
-        topo_dim = self.ph.out_features
+        topo_dim = self.ph.out_features            # graph-level width
+        node_dim = self.ph.node_out_features       # node-level width
         self.topo_norm = nn.LayerNorm(topo_dim)
         if node_level:
-            self.node_norm = nn.LayerNorm(topo_dim)
+            self.node_norm = nn.LayerNorm(node_dim)
 
         # fuse x || T_graph  (+ t_row || t_col when node-level features are on)
-        fuse_in = eqv_features + (3 if node_level else 1) * topo_dim
+        fuse_in = eqv_features + topo_dim + (2 * node_dim if node_level else 0)
         self.fusion = nn.Sequential(
             nn.Conv2d(fuse_in, eqv_features, kernel_size=1, bias=True),
             nn.ReLU(),
