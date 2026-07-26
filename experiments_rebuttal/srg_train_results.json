@@ -2,43 +2,43 @@
   {
     "pair": "Rook(4,4) vs Shrikhande",
     "baseline_sep_pct": 0.0,
-    "topo_sep_pct": 20.0,
-    "topo_margin_median": 7309.7275390625,
-    "baseline_loss_med": 0.6931473016738892
+    "topo_sep_pct": 60.0,
+    "topo_margin_median": 1.4585180282592773,
+    "baseline_loss_med": 0.6931471824645996
   },
   {
     "pair": "T(8) vs Chang_1",
     "baseline_sep_pct": 0.0,
     "topo_sep_pct": 0.0,
-    "topo_margin_median": 30.817413330078125,
+    "topo_margin_median": 2.9802322387695312e-08,
     "baseline_loss_med": 0.6931471824645996
   },
   {
     "pair": "T(8) vs Chang_2",
     "baseline_sep_pct": 0.0,
-    "topo_sep_pct": 0.0,
-    "topo_margin_median": 0.0078125,
-    "baseline_loss_med": 0.6931472420692444
+    "topo_sep_pct": 20.0,
+    "topo_margin_median": 0.4694594144821167,
+    "baseline_loss_med": 0.6931471824645996
   },
   {
     "pair": "T(8) vs Chang_3",
     "baseline_sep_pct": 0.0,
-    "topo_sep_pct": 20.0,
-    "topo_margin_median": 1062.9296875,
-    "baseline_loss_med": 0.6931472420692444
+    "topo_sep_pct": 40.0,
+    "topo_margin_median": 8.601070404052734,
+    "baseline_loss_med": 0.6931471824645996
   },
   {
     "pair": "Paley(25) vs L3(5)",
     "baseline_sep_pct": 0.0,
-    "topo_sep_pct": 20.0,
-    "topo_margin_median": 702.740234375,
+    "topo_sep_pct": 0.0,
+    "topo_margin_median": 0.02447589486837387,
     "baseline_loss_med": 0.6931471824645996
   },
   {
     "pair": "Paley(49) vs Peisert(49)",
     "baseline_sep_pct": 0.0,
     "topo_sep_pct": 0.0,
-    "topo_margin_median": 0.260498046875,
+    "topo_margin_median": 1.4898719787597656,
     "baseline_loss_med": 0.6931471824645996
   }
 ]

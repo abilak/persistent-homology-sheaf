@@ -32,14 +32,15 @@ def structural_counts(A_bin_np):
     G = nx.from_numpy_array(A_bin_np)
     counts = np.zeros((M, len(_CYCLE_LENGTHS)), dtype=np.float32)
     lidx = {L: i for i, L in enumerate(_CYCLE_LENGTHS)}
-    try:
-        for cyc in nx.simple_cycles(G, length_bound=max(_CYCLE_LENGTHS)):
-            L = len(cyc)
-            if L in lidx:
-                for v in cyc:
-                    counts[v, lidx[L]] += 1
-    except Exception:
-        pass
+    # NOTE: deliberately NOT wrapped in try/except. If cycle enumeration fails
+    # (e.g. networkx < 3.1 has no length_bound) the GSN baseline would silently
+    # degenerate to GIN with constant-zero extra channels, which would look like
+    # a real result. Fail loudly instead.
+    for cyc in nx.simple_cycles(G, length_bound=max(_CYCLE_LENGTHS)):
+        L = len(cyc)
+        if L in lidx:
+            for v in cyc:
+                counts[v, lidx[L]] += 1
     if len(_CYCLE_CACHE) < 200000:
         _CYCLE_CACHE[key] = counts
     return counts
@@ -91,7 +92,11 @@ class BaselineModel(nn.Module):
         if self.kind == 'gsn':
             in_dim += len(_CYCLE_LENGTHS)   # append per-node cycle counts
         hidden = config.architecture.block_features[0]
-        self.n_layers = len(config.architecture.block_features)
+        # Message-passing depth. Standard GIN/GCN TU configurations use 5
+        # layers; the PPGN backbone uses 2 equivariant blocks. Defaults to the
+        # standard 5 so the baselines are as strong as their published
+        # counterparts, overridable via `baseline_layers`.
+        self.n_layers = getattr(config.architecture, 'baseline_layers', 5)
         self.num_classes = config.num_classes
 
         self.layers = nn.ModuleList()
@@ -112,8 +117,16 @@ class BaselineModel(nn.Module):
         if self.kind == 'mlp':
             return h                                   # no message passing
         if self.kind == 'gcn':
+            # Kipf & Welling renormalization: D~^-1/2 (A+I) D~^-1/2, computed
+            # from the BINARY adjacency. (Using the precomputed D^-1/2 A D^-1/2
+            # plus a full-weight identity would give the self-loop weight 1 vs
+            # ~1/d for neighbours, making the layer behave almost like an MLP.)
             M = h.shape[1]
-            A_hat = A_norm + torch.eye(M, device=h.device).unsqueeze(0)
+            eye = torch.eye(M, device=h.device).unsqueeze(0)
+            A_tilde = A_bin + eye
+            deg = A_tilde.sum(-1)                              # B x M
+            dinv = torch.rsqrt(deg.clamp(min=1e-12))
+            A_hat = A_tilde * dinv.unsqueeze(-1) * dinv.unsqueeze(-2)
             return torch.bmm(A_hat, h)                 # spectral conv
         if self.kind in ('gin', 'gsn'):
             return (1 + self.eps[layer_i]) * h + torch.bmm(A_bin, h)  # sum agg

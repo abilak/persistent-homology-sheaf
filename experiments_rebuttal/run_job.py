@@ -107,8 +107,12 @@ if __name__ == '__main__':
     overrides = json.loads(sys.argv[7]) if len(sys.argv) > 7 else None
     res = run(dataset, model_type, seed, fold, epochs, overrides)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out, 'w') as f:
+    # atomic write: a job killed mid-dump must not leave a truncated file that
+    # the resumable runner would then treat as "already done"
+    tmp = out + ".tmp"
+    with open(tmp, 'w') as f:
         json.dump(res, f)
+    os.replace(tmp, out)
     print(f"DONE {dataset}/{model_type}/seed{seed}/fold{fold} "
           f"best_val={res['best_val_acc']:.4f}@{res['best_epoch']} "
           f"{res['sec_per_train_epoch']:.2f}s/ep total={res['total_sec']:.0f}s")
