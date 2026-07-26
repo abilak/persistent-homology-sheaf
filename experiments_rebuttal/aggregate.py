@@ -23,7 +23,9 @@ def load():
             continue
         try:
             with open(fp) as f:
-                rows.append(json.load(f))
+                r = json.load(f)
+            if all(k in r for k in ('dataset', 'model', 'best_val_acc')):
+                rows.append(r)
         except Exception:
             pass
     return rows
@@ -81,7 +83,7 @@ def main():
         by.setdefault((r['dataset'], r['model']), []).append(r)
 
     datasets = sorted({d for d, _ in by})
-    models = ['mlp', 'gcn', 'gin', 'baseline', 'topo']
+    models = ['mlp', 'gcn', 'gin', 'gsn', 'baseline', 'topo']
 
     print("=" * 100)
     print("PER-MODEL VALIDATION ACCURACY (mean +/- std over all seed x fold runs)"

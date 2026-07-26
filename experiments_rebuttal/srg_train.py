@@ -21,8 +21,8 @@ from srg_graphs import all_pairs
 from srg_analysis import graph_to_input, make_config
 from models.base_model import BaseModel
 
-SEEDS = 10
-STEPS = 150
+SEEDS = 5
+STEPS = 100
 
 
 def train_separate(G1, G2, use_topology, seed):

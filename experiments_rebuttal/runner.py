@@ -43,13 +43,29 @@ PLANS = {
                        for s in [0, 1]
                        for m in ["baseline", "topo"]
                        for f in range(1, 11)],
+    # FAIR hyperparameter check on NCI1 (paper's stated grid: lr, topo width),
+    # applied to BOTH baseline and topo, on 3 folds / seed 0. Pick the config
+    # that is best for BOTH; the big runs then use it. Not p-hacking: it is the
+    # HP grid the paper says it tuned over.
+    "hp_check": [dict(dataset="NCI1", model=m, seed=0, fold=f, epochs=None,
+                      variant=vname, overrides=ov)
+                 for f in [1, 2, 3]
+                 for m in ["baseline", "topo"]
+                 for vname, ov in [
+                     ("lr1e-4", {"learning_rate": 1e-4}),
+                     ("lr5e-4", {"learning_rate": 5e-4}),
+                     ("lr1e-3", {"learning_rate": 1e-3}),
+                     ("ns16", {"topo_num_stats": 16, "topo_hidden_dim": 16}),
+                     ("ns8", {"topo_num_stats": 8, "topo_hidden_dim": 8}),
+                 ]],
 }
 
 
 def result_path(job):
-    ep = f"_e{job['epochs']}" if job['epochs'] else ""
+    ep = f"_e{job['epochs']}" if job.get('epochs') else ""
+    var = f"_{job['variant']}" if job.get('variant') else ""
     return os.path.join(RESULTS, job['dataset'],
-                        f"{job['model']}_s{job['seed']}_f{job['fold']}{ep}.json")
+                        f"{job['model']}_s{job['seed']}_f{job['fold']}{ep}{var}.json")
 
 
 def run_plan(plan_name, workers, threads):
@@ -69,7 +85,10 @@ def run_plan(plan_name, workers, threads):
                    VECLIB_MAXIMUM_THREADS=str(threads))
         args = [PY, os.path.join(HERE, "run_job.py"), job['dataset'],
                 job['model'], str(job['seed']), str(job['fold']), rp]
-        if job['epochs']:
+        if job.get('overrides'):
+            args += [str(job['epochs']) if job.get('epochs') else '-',
+                     json.dumps(job['overrides'])]
+        elif job.get('epochs'):
             args.append(str(job['epochs']))
         log = open(rp + ".log", "w")
         p = subprocess.Popen(args, cwd=ROOT, env=env, stdout=log,

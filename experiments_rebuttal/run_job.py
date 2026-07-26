@@ -29,7 +29,7 @@ ARCH = {
 }
 
 
-def build_config(dataset, model_type):
+def build_config(dataset, model_type, overrides=None):
     a = ARCH[dataset]
     arch = dict(block_features=a['block'], depth_of_mlp=2, new_suffix=True,
                 use_topology=False,
@@ -52,12 +52,21 @@ def build_config(dataset, model_type):
     cfg.hyperparams.learning_rate = C.LEARNING_RATES[dataset]
     cfg.hyperparams.decay_rate = C.DECAY_RATES[dataset]
     cfg.num_fold = None
+    # optional fair hyperparameter overrides (applied to BOTH baseline & topo)
+    if overrides:
+        for k, v in overrides.items():
+            if k in ('learning_rate', 'decay_rate', 'batch_size'):
+                cfg.hyperparams[k] = v
+            elif k == 'block_width':
+                cfg.architecture.block_features = [v] * len(a['block'])
+            else:  # architecture knobs (topo_hidden_dim, topo_num_stats, ...)
+                cfg.architecture[k] = v
     return cfg
 
 
-def run(dataset, model_type, seed, fold, epochs=None):
+def run(dataset, model_type, seed, fold, epochs=None, overrides=None):
     torch.manual_seed(seed); np.random.seed(seed)
-    cfg = build_config(dataset, model_type)
+    cfg = build_config(dataset, model_type, overrides)
     if epochs is not None:
         cfg.num_epochs = epochs
     cfg.num_fold = fold
@@ -86,6 +95,7 @@ def run(dataset, model_type, seed, fold, epochs=None):
         sec_per_train_epoch=round(float(np.mean(epoch_times)), 4),
         total_sec=round(total, 1), val_size=int(data.val_size),
         train_size=int(data.train_size), val_curve=val_curve,
+        overrides=overrides or {},
     )
 
 
@@ -93,8 +103,9 @@ if __name__ == '__main__':
     dataset, model_type = sys.argv[1], sys.argv[2]
     seed, fold = int(sys.argv[3]), int(sys.argv[4])
     out = sys.argv[5]
-    epochs = int(sys.argv[6]) if len(sys.argv) > 6 else None
-    res = run(dataset, model_type, seed, fold, epochs)
+    epochs = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] != '-' else None
+    overrides = json.loads(sys.argv[7]) if len(sys.argv) > 7 else None
+    res = run(dataset, model_type, seed, fold, epochs, overrides)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, 'w') as f:
         json.dump(res, f)
