@@ -286,11 +286,14 @@ class DifferentiablePH(nn.Module):
             st_tree.persistence()
             pairs = st_tree.persistence_pairs()
 
-            val_to_nodes = defaultdict(set)
-            for idx, sigma in enumerate(simplices_list):
-                key = (len(sigma), round(filt_vals_list[idx], 6))
-                for v in sigma:
-                    val_to_nodes[key].add(v)
+            # node-involvement lookup only needed for node-level features
+            node_level = num_nodes is not None
+            if node_level:
+                val_to_nodes = defaultdict(set)
+                for idx, sigma in enumerate(simplices_list):
+                    key = (len(sigma), round(filt_vals_list[idx], 6))
+                    for v in sigma:
+                        val_to_nodes[key].add(v)
 
             dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
             for birth_simplex, death_simplex in pairs:
@@ -306,10 +309,12 @@ class DifferentiablePH(nn.Module):
                     death_val = filt_adjusted[simplex_to_idx[death_key]]
                     persistence = torch.clamp(death_val - birth_val, min=0)
                     bp = torch.stack([birth_val, persistence])
-                    bv_r = round(filt_vals_list[simplex_to_idx[birth_key]], 6)
-                    dv_r = round(filt_vals_list[simplex_to_idx[death_key]], 6)
-                    involved = (val_to_nodes[(len(birth_simplex), bv_r)]
-                                | val_to_nodes[(len(death_simplex), dv_r)])
+                    involved = None
+                    if node_level:
+                        bv_r = round(filt_vals_list[simplex_to_idx[birth_key]], 6)
+                        dv_r = round(filt_vals_list[simplex_to_idx[death_key]], 6)
+                        involved = (val_to_nodes[(len(birth_simplex), bv_r)]
+                                    | val_to_nodes[(len(death_simplex), dv_r)])
                     dim_data[dim].append((bp, involved))
 
             graph_parts, node_parts = [], []
@@ -355,16 +360,20 @@ class DifferentiablePH(nn.Module):
 class TopologyLayer(nn.Module):
     """Full topology branch for one layer: learned filtration -> differentiable
     PH -> broadcast (graph + node level) -> gated residual fusion."""
-    def __init__(self, eqv_features, hidden_dim=64, max_ph_dim=1, num_stats=4):
+    def __init__(self, eqv_features, hidden_dim=64, max_ph_dim=1, num_stats=4,
+                 gate_bias=2.0, node_level=True):
         super().__init__()
+        self.node_level = node_level
         self.filtration = LearnedFiltration(eqv_features, hidden_dim)
         self.ph = DifferentiablePH(max_ph_dim, num_stats)
 
         topo_dim = self.ph.out_features
         self.topo_norm = nn.LayerNorm(topo_dim)
-        self.node_norm = nn.LayerNorm(topo_dim)
+        if node_level:
+            self.node_norm = nn.LayerNorm(topo_dim)
 
-        fuse_in = eqv_features + 3 * topo_dim
+        # fuse x || T_graph  (+ t_row || t_col when node-level features are on)
+        fuse_in = eqv_features + (3 if node_level else 1) * topo_dim
         self.fusion = nn.Sequential(
             nn.Conv2d(fuse_in, eqv_features, kernel_size=1, bias=True),
             nn.ReLU(),
@@ -377,21 +386,29 @@ class TopologyLayer(nn.Module):
 
         self.gate_conv = nn.Conv2d(fuse_in, eqv_features, kernel_size=1, bias=True)
         nn.init.normal_(self.gate_conv.weight, std=0.01)
-        nn.init.constant_(self.gate_conv.bias, 2.0)
+        # gate_bias controls how much topology contributes initially:
+        # +2 -> sigmoid 0.88 (topo strongly on); <=0 -> starts near/at baseline,
+        # so the model can only add topology where it helps (safer).
+        nn.init.constant_(self.gate_conv.bias, gate_bias)
 
     def forward(self, x_eqv, structs):
         B, d, M, _ = x_eqv.shape
         filt_batch = self.filtration(x_eqv, structs)
-        graph_vec, node_vec = self.ph(filt_batch, device=x_eqv.device, num_nodes=M)
+        graph_vec, node_vec = self.ph(
+            filt_batch, device=x_eqv.device,
+            num_nodes=M if self.node_level else None)
 
         graph_vec = self.topo_norm(graph_vec)
-        node_vec = self.node_norm(node_vec.permute(0, 2, 1)).permute(0, 2, 1)
-
         graph_bc = graph_vec.unsqueeze(-1).unsqueeze(-1).expand(B, -1, M, M)
-        node_row = node_vec.unsqueeze(-1).expand(B, -1, M, M)
-        node_col = node_vec.unsqueeze(-2).expand(B, -1, M, M)
 
-        combined = torch.cat([x_eqv, graph_bc, node_row, node_col], dim=1)
+        if self.node_level:
+            node_vec = self.node_norm(node_vec.permute(0, 2, 1)).permute(0, 2, 1)
+            node_row = node_vec.unsqueeze(-1).expand(B, -1, M, M)
+            node_col = node_vec.unsqueeze(-2).expand(B, -1, M, M)
+            combined = torch.cat([x_eqv, graph_bc, node_row, node_col], dim=1)
+        else:
+            combined = torch.cat([x_eqv, graph_bc], dim=1)
+
         gate = torch.sigmoid(self.gate_conv(combined))
         delta = self.fusion(combined)
         return x_eqv + gate * delta

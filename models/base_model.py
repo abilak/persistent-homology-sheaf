@@ -31,11 +31,15 @@ class BaseModel(nn.Module):
                 topo_hidden = getattr(config.architecture, 'topo_hidden_dim', 64)
                 topo_ph_dim = getattr(config.architecture, 'topo_max_ph_dim', 1)
                 topo_stats = getattr(config.architecture, 'topo_num_stats', 4)
+                gate_bias = getattr(config.architecture, 'topo_gate_bias', 2.0)
+                node_level = getattr(config.architecture, 'topo_node_level', True)
                 self.topo_layers.append(
                     TopologyLayer(eqv_features=next_layer_features,
                                   hidden_dim=topo_hidden,
                                   max_ph_dim=topo_ph_dim,
-                                  num_stats=topo_stats)
+                                  num_stats=topo_stats,
+                                  gate_bias=gate_bias,
+                                  node_level=node_level)
                 )
             last_layer_features = next_layer_features
 

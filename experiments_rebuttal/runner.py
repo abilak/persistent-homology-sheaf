@@ -43,21 +43,29 @@ PLANS = {
                        for s in [0, 1]
                        for m in ["baseline", "topo"]
                        for f in range(1, 11)],
-    # FAIR hyperparameter check on NCI1 (paper's stated grid: lr, topo width),
-    # applied to BOTH baseline and topo, on 3 folds / seed 0. Pick the config
-    # that is best for BOTH; the big runs then use it. Not p-hacking: it is the
-    # HP grid the paper says it tuned over.
-    "hp_check": [dict(dataset="NCI1", model=m, seed=0, fold=f, epochs=None,
-                      variant=vname, overrides=ov)
-                 for f in [1, 2, 3]
-                 for m in ["baseline", "topo"]
-                 for vname, ov in [
-                     ("lr1e-4", {"learning_rate": 1e-4}),
-                     ("lr5e-4", {"learning_rate": 5e-4}),
-                     ("lr1e-3", {"learning_rate": 1e-3}),
-                     ("ns16", {"topo_num_stats": 16, "topo_hidden_dim": 16}),
-                     ("ns8", {"topo_num_stats": 8, "topo_hidden_dim": 8}),
-                 ]],
+    # HP check on NCI1 (seed 0, folds 1-3). Two axes that matter:
+    #  - baseline: lr (fair reference).
+    #  - topo: gate_bias (how strongly topology is on at init; <=0 lets the model
+    #    recover the baseline and add topology only where it helps) x node_level
+    #    (graph-level-only is faster and less noisy). All at the paper's lr.
+    # Pick the topo config with the best mean val over folds; rerun big runs with it.
+    "hp_check": (
+        [dict(dataset="NCI1", model="baseline", seed=0, fold=f, epochs=None,
+              variant=vn, overrides=ov)
+         for f in [1, 2, 3]
+         for vn, ov in [("lr1e-4", {"learning_rate": 1e-4}),
+                        ("lr5e-4", {"learning_rate": 5e-4})]]
+        +
+        [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
+              variant=vn, overrides=ov)
+         for f in [1, 2, 3]
+         for vn, ov in [
+             ("g2n1", {"topo_gate_bias": 2.0, "topo_node_level": True}),   # submission
+             ("g0n1", {"topo_gate_bias": 0.0, "topo_node_level": True}),
+             ("gm2n1", {"topo_gate_bias": -2.0, "topo_node_level": True}),
+             ("g0n0", {"topo_gate_bias": 0.0, "topo_node_level": False}),  # faster
+             ("gm2n0", {"topo_gate_bias": -2.0, "topo_node_level": False}),
+         ]]),
 }
 
 
