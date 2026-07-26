@@ -62,6 +62,15 @@ PLANS = {
                                    "topo_multiplicity": True,
                                    "topo_scale_stats": True}),
                    ]],
+    # PTC lr probe. Paper default is 1e-4; on NCI1 the same default is +7pts
+    # worse than 5e-4. If PTC has the same problem, main PTC runs need redoing.
+    "ptc_lr_probe": [dict(dataset="PTC", model=m, seed=0, fold=f, epochs=None,
+                          variant=vn, overrides=ov)
+                     for f in [1, 2, 3]
+                     for m in ["baseline", "topo"]
+                     for vn, ov in [("lr1e-4", {"learning_rate": 1e-4}),
+                                    ("lr5e-4", {"learning_rate": 5e-4}),
+                                    ("lr1e-3", {"learning_rate": 1e-3})]],
     "big_heavy_nci1": [dict(dataset="NCI1", model=m, seed=s, fold=f, epochs=None)
                        for s in [0, 1]
                        for m in ["baseline", "topo"]
