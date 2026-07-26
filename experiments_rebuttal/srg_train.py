@@ -22,7 +22,7 @@ from srg_analysis import graph_to_input, make_config
 from models.base_model import BaseModel
 
 SEEDS = 5
-STEPS = 100
+STEPS = 250
 
 
 def train_separate(G1, G2, use_topology, seed):
@@ -30,7 +30,7 @@ def train_separate(G1, G2, use_topology, seed):
     x = torch.cat([graph_to_input(G1), graph_to_input(G2)], dim=0)  # (2,1,n,n)
     y = torch.tensor([0, 1])
     model = BaseModel(make_config(use_topology))
-    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     model.train()
     for _ in range(STEPS):
         opt.zero_grad()
@@ -40,9 +40,12 @@ def train_separate(G1, G2, use_topology, seed):
     model.eval()
     with torch.no_grad():
         out = model(x)
-    separated = bool(out.argmax(1)[0].item() != out.argmax(1)[1].item())
+    # "separated" = the model correctly assigns the two graphs to their two
+    # distinct classes (train accuracy 100% on this 2-graph task). A 3-WL model
+    # has identical representations for the pair, so it can never do this.
+    correct = bool(out.argmax(1)[0].item() == 0 and out.argmax(1)[1].item() == 1)
     margin = float((out[0] - out[1]).abs().max())
-    return separated, margin, float(loss)
+    return correct, margin, float(loss)
 
 
 def main():
