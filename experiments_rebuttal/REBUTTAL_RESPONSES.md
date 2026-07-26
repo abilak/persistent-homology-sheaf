@@ -44,9 +44,12 @@ now report the **full 10-fold over 5 seeds (50 runs/cell)**.
 small datasets, comparing marginal means is the wrong test. We report the
 **paired** difference topo−baseline on matched (seed, fold), which cancels the
 shared fold-difficulty variance, with a sign-flip permutation test, a Wilcoxon
-signed-rank test, and 95% bootstrap CIs. [[MUTAG: mean paired Δ = __%, 95% CI
-[__,__], perm p=__; PTC: __]]. The matched improvement is [[significant/…]]
-even where the marginal std is large — precisely the concern you raise.
+signed-rank test, and 95% bootstrap CIs. On MUTAG (10-fold x 5 seeds): baseline
+88.2+-5.8, topo 89.8+-6.6, paired diff = +1.7%, 95% CI [-0.1, +3.7], permutation
+p = 0.11 -- a positive trend, not yet significant on this saturated 188-graph
+set. [[PTC / NCI1 / NCI109 running -- the larger, discriminative datasets are
+decisive.]] The MUTAG-scale gaps sit within fold-std for ALL methods, which is
+exactly the concern you raise and why we rely on paired tests + larger datasets.
 
 **Stronger same-protocol baselines.** We add GCN, GIN, an MLP (a GNN with no
 message passing), and **GSN (subgraph counting)** in our *own* pipeline (identical
