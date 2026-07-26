@@ -1,0 +1,13 @@
+# Everything third-party the rebuttal code imports.
+# torch: install matching your CUDA — e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+gudhi
+networkx
+numpy
+scipy
+easydict
+tqdm
+matplotlib
+pandas
+six
+certifi
