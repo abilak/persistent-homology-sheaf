@@ -54,9 +54,20 @@ def load(dataset=None):
             bad += 1
             print(f"  [warn] incomplete result: {fp}")
             continue
+        # Runs at the tuned lr for a dataset are treated as an alternate main
+        # pool, tagged with the lr suffix (e.g. "topo@lr1e-3"). They do NOT
+        # merge with the paper-lr pool, so the two are reported side by side
+        # rather than one silently averaging into the other.
         if r.get("overrides"):
-            continue                                    # swept config
-        key = (r["dataset"], r["model"])
+            ov = r["overrides"]
+            if set(ov.keys()) == {"learning_rate"}:
+                lr = ov["learning_rate"]
+                model = f"{r['model']}@lr{lr:g}"
+            else:
+                continue                                # generic HP sweep
+        else:
+            model = r["model"]
+        key = (r["dataset"], model)
         sf = (r["seed"], r["fold"])
         if sf in out[key]:
             print(f"  [warn] duplicate run {key} {sf}: {fp}")
@@ -172,7 +183,10 @@ def main():
     print("=" * 96)
     for ds in datasets:
         print(f"\n{ds}:")
-        for m in MODELS:
+        # standard models first, then any tuned-lr pools (baseline@lrX / topo@lrX)
+        ds_models = [m for m in MODELS if (ds, m) in by]
+        ds_models += sorted(m for d, m in by if d == ds and '@' in m)
+        for m in ds_models:
             runs = by.get((ds, m))
             if not runs:
                 continue
@@ -185,7 +199,7 @@ def main():
                                         xu_std=float(xu.std(ddof=1) * 100),
                                         maxep_mean=float(mx.mean() * 100),
                                         n_runs=n, n_folds=len(xu))
-            print(f"  {m:<9} {xu.mean()*100:6.2f} +/- {xu.std(ddof=1)*100:4.2f}"
+            print(f"  {m:<18} {xu.mean()*100:6.2f} +/- {xu.std(ddof=1)*100:4.2f}"
                   f"   95%CI[{lo:.2f},{hi:.2f}]"
                   f"   [biased: {mx.mean()*100:.2f}]   runs={n}")
 
@@ -194,9 +208,22 @@ def main():
           "n = #folds)")
     print("=" * 96)
     for ds in datasets:
-        b, t = by.get((ds, 'baseline')), by.get((ds, 'topo'))
-        if not b or not t:
-            continue
+        # paper-lr pool and every matching topo@lrX / baseline@lrX pool
+        model_keys = {m for d, m in by if d == ds}
+        pair_tags = set()
+        if 'baseline' in model_keys and 'topo' in model_keys:
+            pair_tags.add('')
+        for m in model_keys:
+            if m.startswith('baseline@'):
+                lr = m.split('@', 1)[1]
+                if f'topo@{lr}' in model_keys:
+                    pair_tags.add('@' + lr)
+        for tag in sorted(pair_tags):
+            b = by.get((ds, 'baseline' + tag))
+            t = by.get((ds, 'topo' + tag))
+            if not b or not t:
+                continue
+            tag_display = f" [{tag[1:]}]" if tag else " [paper lr]"
         for tag, use_xu in (("Xu protocol (headline)", True),
                             ("best-epoch-per-fold (biased)", False)):
             sb, _ = per_fold_scores(b, xu=use_xu)
@@ -207,7 +234,7 @@ def main():
             lo, hi = boot_ci(d, seed=abs(hash((ds, tag))) % 2**31)
             pp, pw = perm_p(d), wilcoxon_p(d)
             w = int(np.sum(d > 0)); l = int(np.sum(d < 0)); tie = int(np.sum(d == 0))
-            print(f"\n{ds}  [{tag}]  n={len(d)} folds")
+            print(f"\n{ds}{tag_display}  [{tag}]  n={len(d)} folds")
             print(f"   mean diff {d.mean():+.2f}%   95%CI[{lo:+.2f},{hi:+.2f}]"
                   f"   W/L/T {w}/{l}/{tie}")
             print(f"   permutation p={pp:.4f}   Wilcoxon p={pw:.4f}"

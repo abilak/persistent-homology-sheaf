@@ -71,6 +71,15 @@ PLANS = {
                      for vn, ov in [("lr1e-4", {"learning_rate": 1e-4}),
                                     ("lr5e-4", {"learning_rate": 5e-4}),
                                     ("lr1e-3", {"learning_rate": 1e-3})]],
+    # PTC main runs at the WINNING lr (1e-3 beats paper's 1e-4 by 8pts on both
+    # baseline and topo). Same 10 folds x 5 seeds as `small`, but with
+    # overrides={"learning_rate":1e-3}. Results land as topo_s?_f?_lr1e-3.json
+    # (variant-tagged) so they don't overwrite the paper-lr runs.
+    "ptc_main_lr1e-3": [dict(dataset="PTC", model=m, seed=s, fold=f, epochs=None,
+                             variant="lr1e-3", overrides={"learning_rate": 1e-3})
+                        for s in range(5)
+                        for m in ["baseline", "topo"]
+                        for f in range(1, 11)],
     "big_heavy_nci1": [dict(dataset="NCI1", model=m, seed=s, fold=f, epochs=None)
                        for s in [0, 1]
                        for m in ["baseline", "topo"]
