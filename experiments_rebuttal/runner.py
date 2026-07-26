@@ -110,6 +110,15 @@ PLANS = {
                          "topo_num_stats": 8, "topo_hidden_dim": 16,
                          "topo_gate_bias": -2.0, "topo_multiplicity": True,
                          "topo_scale_stats": True}),
+             # baseline lr sweep showed lr=5e-4 is +7pts over the paper's
+             # lr=1e-4 on NCI1; topo has to be tested at the same lr for a
+             # fair comparison. Two most-promising configs at the winning lr.
+             ("g0n1_lr5e-4", {"topo_gate_bias": 0.0, "topo_node_level": True,
+                              "learning_rate": 5e-4}),
+             ("lean_lr5e-4", {"topo_apply_layers": "last",
+                              "topo_node_level": False,
+                              "topo_num_stats": 8, "topo_hidden_dim": 16,
+                              "topo_gate_bias": -2.0, "learning_rate": 5e-4}),
          ]]),
 }
 
