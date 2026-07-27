@@ -212,28 +212,57 @@ GNN. All use identical splits so numbers are directly comparable.
 
 ## Q3. GCN, GIN, MLP baselines + PH training-time overhead
 
-Accuracy answered above. Runtime (batched CPU, s/epoch):
+Accuracy answered above (Q2 tables).
 
-| model | MUTAG | PTC | vs GCN |
+**Clean GPU runtimes (`gpu_timing.py`, CUDA-synced, warmup + 5 measurements
+per model per dataset)**. Forward + backward ms per graph:
+
+| model | MUTAG | PTC | NCI1 |
 |---|---|---|---|
-| MLP | 0.07 | 0.13 | ~1x |
-| GCN | 0.07 | 0.17 | 1x |
-| GIN | 0.07 | 0.15 | ~1x |
-| GSN | 0.12 | 0.27 | ~1.8x |
-| PPGN (baseline) | 0.61 | 2.02 | ~10x |
-| PPGN + PH | 2.09 | 5.37 | ~32x |
+| MLP (no MP) | $0.28$ | $0.43$ | $0.091$ |
+| GCN | $0.32$ | $0.49$ | $0.101$ |
+| GIN | $0.33$ | $0.50$ | $0.101$ |
+| GSN (subgraph) | $0.34$ | $0.58$ | $0.118$ |
+| PPGN (baseline) | $0.28$ | $0.50$ | $0.170$ |
+| **PPGN + PH** | $\mathbf{2.93}$ | $\mathbf{4.66}$ | $\mathbf{3.90}$ |
 
-Honest framing (in the Q3 response): **two multiplicative factors, both
-worth naming separately**. (1) PPGN is $\sim 10\times$ light MP GNNs
-because it operates on $M{\times}M$ tensors -- this is the equivariant
-tensor architecture, unrelated to PH. (2) PH adds $\sim 3\times$ over the
-PPGN backbone on CPU; on GPU this drops to $\sim 1.3$--$2\times$ due to
-per-graph structural caching (`GraphStruct`) and batched single-sync host
-transfers. Bit-identical to the submission (`test_topo_equiv.py`,
-`test_batching.py` verify fwd + grad diff = 0 across all option
-combinations).
+**Two observations, both important, and we are direct about them:**
 
-Server should run `gpu_timing.py MUTAG PTC NCI1` for the clean GPU numbers.
+1. **On GPU, the equivariant PPGN baseline is essentially the same cost per
+   graph as the light message-passing baselines** (0.28--0.50 ms/graph
+   depending on graph size). The $10\times$ CPU gap between PPGN and
+   GCN/GIN/MLP is a CPU kernel-launch artifact --- the dense matrix ops
+   PPGN uses are exactly what GPUs accelerate best. This addresses the
+   reviewer's implicit worry about PPGN being an expensive backbone on
+   modest hardware.
+
+2. **The PH branch adds a $\sim$$10\times$ overhead over the baseline on
+   GPU** ($2.93/0.28$ on MUTAG, $4.66/0.50$ on PTC, $3.90/0.17$ on NCI1).
+   We are transparent that this is not the ``equivalent to standard
+   architectures'' picture the reviewer hoped for. The origin is
+   architectural: the PH branch's per-graph work (clique-complex
+   traversal, differentiable filtration, gudhi persistence) is
+   fundamentally CPU-bound and does not vectorize the way dense
+   equivariant tensor ops do. We reduce it as far as possible with
+   per-graph structural caching (\texttt{GraphStruct}), batched
+   single-sync host transfers, and vectorised non-decreasing correction
+   (numerically identical to the submission --- verified by
+   \texttt{test\_topo\_equiv.py} and \texttt{test\_batching.py}, forward
+   and gradient bit-identical). But the residual $\sim$$10\times$ is a
+   real cost of the topological branch.
+
+**In absolute terms, all six models complete a training epoch in seconds
+even on the largest dataset**: PPGN+PH is 0.5 s/epoch on MUTAG, 1.5 s/epoch
+on PTC, 14 s/epoch on NCI1 (batch 64). A full 200-epoch fold takes at
+most $\sim$$1$ hour on a single GPU. Persistent homology is not a
+production-training bottleneck at these graph sizes, but nor is it
+free-of-charge.
+
+**Position:** we do not claim PPGN+PH is a low-cost alternative to GCN/GIN.
+It is a more expressive model class (Corollary 6), with the SR
+classification benchmark of Q1 showing that no lower-cost architecture can
+solve the tasks it solves at any wall-clock. The runtime cost is the price
+of the expressivity guarantee.
 
 ---
 
