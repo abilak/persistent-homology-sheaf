@@ -58,6 +58,10 @@ PLANS = {
     "cheap_mid": list(jobs_for(["PROTEINS", "NCI109"],
                               ["mlp", "gcn", "gin", "gsn"],
                               [0, 1, 2, 3, 4], range(1, 11))),
+    # NCI1 same-code baselines only -- fills the NCI1 column of Table 2 quickly
+    "cheap_nci1": list(jobs_for(["NCI1"],
+                               ["mlp", "gcn", "gin", "gsn"],
+                               [0, 1, 2, 3, 4], range(1, 11))),
     # light baselines on big datasets (cheap): 5 seeds
     "big_light": list(jobs_for(["NCI1", "NCI109"],
                               ["gcn", "gin", "mlp", "gsn"],
