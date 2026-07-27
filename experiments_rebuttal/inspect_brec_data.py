@@ -78,10 +78,45 @@ def main():
     g, t = frac_noniso(half)
     print(f"  halves (k, L/2+k):               {g}/{t} non-isomorphic")
 
-    print("\nInterpretation: the pairing whose pairs are (almost) all "
-          "NON-isomorphic is the correct one. If 'block-of-B' wins, the file "
-          "stores B perms/graph -- reshape to one representative per graph "
-          "before pairing (I can patch the loader once you paste this output).")
+    # (3) repeat structure: does graph 0 (and pair 0) reappear later? A BREC
+    # file of 51200 = 800 x 64 is very likely the 400 canonical pairs repeated
+    # under 64 GLOBAL permutations (perm-major: period = #graphs-per-block), or
+    # each pair stored with N perm-instances back-to-back (pair-major).
+    print("\nrepeat structure:")
+    print(f"  G[0] isomorphic to G[2]?  {nx.is_isomorphic(G[0], G[2])}"
+          f"   (True => pair-major: pair 0 stored as consecutive perm-copies)")
+    # smallest stride P>0 where graph 0 reappears (bounded, node-count guarded)
+    n0 = G[0].number_of_nodes()
+    stride = None
+    limit = min(L, 4000)
+    for P in range(1, limit):
+        gp = flat[P]
+        gP = to_graph(gp)
+        if gP.number_of_nodes() == n0 and nx.is_isomorphic(G[0], gP):
+            stride = P
+            break
+    print(f"  smallest stride with G[0] reappearing: {stride}"
+          + (f"  (scanned first {limit})" if stride is None else ""))
+    if stride:
+        # verify the whole pair repeats at this stride
+        gpair = (to_graph(flat[stride]), to_graph(flat[stride + 1]))
+        pair_repeats = nx.is_isomorphic(G[0], gpair[0]) and \
+            nx.is_isomorphic(G[1], gpair[1])
+        print(f"  pair 0 repeats at stride {stride}? {pair_repeats}")
+        if pair_repeats and L % stride == 0:
+            uniq_graphs = stride
+            print(f"\n=> LAYOUT: {L // stride} permutation-blocks of "
+                  f"{stride} graphs. {uniq_graphs // 2} UNIQUE pairs.")
+            print(f"=> FIX: evaluate only the first block -> "
+                  f"`--pairs 0-{uniq_graphs // 2}` "
+                  f"(categories map correctly to those {uniq_graphs // 2} "
+                  f"pairs).")
+        elif not pair_repeats:
+            print("  (graph 0 recurs but the PAIR doesn't repeat at that "
+                  "stride -- paste this and I'll match the loader.)")
+    else:
+        print("  => no repeat found: looks like genuinely distinct pairs; "
+              "consecutive pairing is correct as-is.")
 
 
 if __name__ == "__main__":
