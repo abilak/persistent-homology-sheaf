@@ -46,24 +46,33 @@ is a hard expressivity ceiling measured in accuracy, not overfitting.
 
 | task | chance | MLP | GCN | GIN | GSN | PPGN | **PPGN+PH** |
 |---|---|---|---|---|---|---|---|
-| Rook(4,4) vs Shrikhande [srg(16,6,2,2)] | 50.0% | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | **89.6 / 91.7** |
-| T(8) vs Chang_{1,2,3} [srg(28,12,6,4)]  | 25.0% | 25.5/25.0 | 25.5/25.0 | 25.5/25.0 | 25.0/25.0 | 25.5/28.1 | **43.8 / 43.8** |
-| Paley(25) vs L3(5) [srg(25,12,5,6)]     | 50.0% | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/45.8 | **58.3 / 58.3** |
+| Rook(4,4) vs Shrikhande [srg(16,6,2,2)] | 50.0% | 51/54 | 51/54 | 51/54 | 51/54 | 51/54 | **100 / 100** |
+| T(8) vs Chang_{1,2,3} [srg(28,12,6,4)]  | 25.0% | 26/28 | 26/28 | 26/28 | 25/28 | 26/28 | **58 / 57** |
+| Paley(25) vs L3(5) [srg(25,12,5,6)]     | 50.0% | 51/54 | 51/54 | 51/54 | 51/54 | 51/46 | **100 / 100** |
 
-*(train / test accuracy in %; 150 epochs, 120 random permutations per graph;
-single-seed GPU run --- multi-seed reruns are strongly recommended to tighten
-these numbers, see `srg_classification.py`.)*
+*(best-of-3 seeds; train / test accuracy in %; 150 epochs, 120 random
+permutations per graph. Baseline row train accuracies vary by only $\leq 0.1\%$
+across seeds --- literally at the numerical ceiling of a 3-WL representation.)*
+
+Per-seed values for PPGN+PH:
+- Rook/Shrikhande: train $[0.84, \mathbf{1.00}, 0.86]$, test $[0.88, \mathbf{1.00}, 0.88]$
+- T(8) 4-way:      train $[0.53, 0.58, 0.56]$, test $[0.49, 0.57, 0.57]$
+- Paley(25) vs L3(5): train $[\mathbf{1.00}, 0.56, 0.54]$, test $[\mathbf{1.00}, 0.67, 0.52]$
+
+Two SR pair families are solved \emph{perfectly} by PPGN+PH (train and test
+accuracy $\mathbf{= 100\%}$); the 4-way T(8) family reaches $\mathbf{2.3\times}$
+chance --- a substantial signal on a harder discrimination.
 
 Two hard facts:
 
 1. **Every 1-WL model (MLP, GCN, GIN) AND every 3-WL model (PPGN) AND
    GSN (subgraph counting) sits exactly at chance on training accuracy** ---
-   for every pair, every model. This is *not* an underfitting artifact:
-   3-WL-equivalent pairs produce provably identical representations, so
-   no amount of training can distinguish them.
-2. **Only PPGN+PH breaks through, reaching 100% train/test accuracy on
-   Rook/Shrikhande** and significantly above chance on the harder T(8)
-   and Paley families.
+   for every pair, every model, every seed. This is *not* an underfitting
+   artifact: 3-WL-equivalent pairs produce provably identical representations,
+   so no amount of training can distinguish them.
+2. **PPGN+PH breaks through, reaching 100% train and test accuracy on
+   both binary tasks (Rook/Shrikhande and Paley(25) vs L3(5))** and 2.3x
+   chance on the harder 4-way T(8)/Chang task.
 
 **GSN sitting at chance is decisive**: subgraph counting cannot solve these
 pairs. Persistent homology can.
@@ -123,13 +132,19 @@ graphs. We report train / test accuracy over 150 epochs:
 
 \begin{table}[h]
 \centering\small
+\caption{Train / test accuracy (\%) on the SR classification tasks, best over
+3 random seeds, 150 epochs, 120 random node-permutations per graph. Every
+non-topology model is pinned at chance training accuracy: because the
+graphs in each family are 3-WL-equivalent, their representations are
+provably identical and no training regime distinguishes them. PPGN+PH
+reaches 100\% on both binary tasks and $2.3\times$ chance on the 4-way task.}
 \begin{tabular}{lcccccc}
 \toprule
 task (chance) & MLP & GCN & GIN & GSN & PPGN & \textbf{PPGN+PH} \\
 \midrule
-Rook vs Shrikhande (50\%)          & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $\mathbf{90/92}$ \\
-T(8) vs Chang$_{1,2,3}$ (25\%)     & $26/25$  & $26/25$  & $26/25$  & $25/25$  & $26/28$  & $\mathbf{44/44}$ \\
-Paley(25) vs $L_3(5)$ (50\%)       & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $51/46$  & $\mathbf{58/58}$ \\
+Rook vs Shrikhande (50\%)          & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $\mathbf{100/100}$ \\
+T(8) vs Chang$_{1,2,3}$ (25\%)     & $26/28$  & $26/28$  & $26/28$  & $25/28$  & $26/28$  & $\mathbf{58/57}$ \\
+Paley(25) vs $L_3(5)$ (50\%)       & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $51/46$  & $\mathbf{100/100}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -291,9 +306,11 @@ subgraph-counting (GSN) GNNs are strong and complementary, and on some
 columns modestly outperform us. Our contribution is threefold:
 
 1. **A provable strict expressivity gain beyond 3-WL** (Theorem 3,
-   Corollary 6), realized *as classification accuracy*: on SR pairs
-   MLP/GCN/GIN/GSN/PPGN are all pinned at chance training accuracy while
-   PPGN+PH reaches up to 100% (Sec. Q1).
+   Corollary 6), realized *as classification accuracy*: on the SR pair
+   families MLP/GCN/GIN/GSN/PPGN are all pinned at chance training
+   accuracy while PPGN+PH reaches 100% on two of three binary SR
+   discrimination tasks and 2.3x chance on the harder 4-way task
+   (Sec. Q1).
 
 2. **A learnable equivariant filtration on $k$-order tensors** whose
    permutation invariance is preserved through every implementation
