@@ -84,6 +84,32 @@ PLANS = {
                        for s in [0, 1]
                        for m in ["baseline", "topo"]
                        for f in range(1, 11)],
+    # Focused, fair NCI1 comparison at the WINNING lr (5e-4; paper's 1e-4 is
+    # 7pts under-tuned for baseline). 10 folds x 1 seed; both models at the
+    # same lr; two topo configs: the paper's g2n1 (as-submitted) and lean
+    # (my capacity-fix hypothesis).  40 jobs total.
+    "nci1_final_lr5e-4": (
+        [dict(dataset="NCI1", model="baseline", seed=0, fold=f, epochs=None,
+              variant="lr5e-4", overrides={"learning_rate": 5e-4})
+         for f in range(1, 11)]
+        + [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
+                variant="paper_lr5e-4",
+                overrides={"learning_rate": 5e-4})
+           for f in range(1, 11)]
+        + [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
+                variant="lean_lr5e-4",
+                overrides={"learning_rate": 5e-4,
+                           "topo_apply_layers": "last",
+                           "topo_node_level": False,
+                           "topo_num_stats": 8, "topo_hidden_dim": 16,
+                           "topo_gate_bias": -2.0})
+           for f in range(1, 11)]
+        + [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
+                variant="g0n1_lr5e-4",
+                overrides={"learning_rate": 5e-4,
+                           "topo_gate_bias": 0.0,
+                           "topo_node_level": True})
+           for f in range(1, 11)]),
     # HP check on NCI1 (seed 0, folds 1-3). Two axes that matter:
     #  - baseline: lr (fair reference).
     #  - topo: gate_bias (how strongly topology is on at init; <=0 lets the model
