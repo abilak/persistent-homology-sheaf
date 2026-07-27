@@ -24,6 +24,21 @@ SAFE = {"topo_gate_mode": "scalar", "topo_gate_init": 0.0,
         "topo_apply_layers": "last", "topo_node_level": False,
         "topo_num_stats": 8, "topo_hidden_dim": 16}
 
+# "Kitchen sink" -- everything we've built at once, aimed at BEATING baseline
+# not just matching it:
+#  - safe scalar gate initialized just barely open (small positive nudge -> a
+#    definite gradient signal without forcing topology on hard)
+#  - multiplicity + scale_stats (richer pooling: count-aware + absolute-scale)
+#  - two topology layers (retain depth; the last block still dominates but
+#    earlier blocks now contribute via their own gated residual)
+#  - node-level features on (they're informative on molecular graphs)
+#  - warm-start for the first 25% of training so the equivariant backbone
+#    trains alone first, then topology adapts on top of it
+KITCHEN = {"topo_gate_mode": "scalar", "topo_gate_init": 0.05,
+           "topo_multiplicity": True, "topo_scale_stats": True,
+           "topo_num_stats": 16, "topo_hidden_dim": 32,
+           "topo_warmup_epochs": 50}
+
 
 def jobs_for(datasets, models, seeds, folds, epochs=None):
     for ds, m, s, f in itertools.product(datasets, models, seeds, folds):
@@ -107,6 +122,16 @@ PLANS = {
                                               topo_gate_init=0.1))
                           for s in range(5)
                           for f in range(1, 11)],
+    # kitchen-sink variant on MUTAG + PTC to see if a richer-pooling +
+    # warm-started config actually beats baseline (rather than just matching)
+    "kitchen_small": (
+        [dict(dataset="MUTAG", model="topo", seed=s, fold=f, epochs=None,
+              variant="kitchen", overrides=dict(KITCHEN))
+         for s in range(3) for f in range(1, 11)]
+        + [dict(dataset="PTC", model="topo", seed=s, fold=f, epochs=None,
+                variant="kitchen_lr1e-3",
+                overrides=dict(KITCHEN, learning_rate=1e-3))
+           for s in range(3) for f in range(1, 11)]),
     # SAFE topology on the small datasets at their tuned lr, matched against
     # the baseline at the same lr. MUTAG's paper lr (5e-4) is already best;
     # PTC's tuned lr is 1e-3.
@@ -159,6 +184,11 @@ PLANS = {
         + [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
                 variant="safe01_lr5e-4",
                 overrides=dict(SAFE, learning_rate=5e-4, topo_gate_init=0.1))
+           for f in range(1, 11)]
+        # NCI1 kitchen sink (richer pooling + warm start) at the tuned lr
+        + [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
+                variant="kitchen_lr5e-4",
+                overrides=dict(KITCHEN, learning_rate=5e-4))
            for f in range(1, 11)]),
     # HP check on NCI1 (seed 0, folds 1-3). Two axes that matter:
     #  - baseline: lr (fair reference).

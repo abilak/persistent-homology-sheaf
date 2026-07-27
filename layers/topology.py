@@ -521,9 +521,17 @@ class TopologyLayer(nn.Module):
             # +2 -> sigmoid 0.88 (topo strongly on); <=0 -> starts near/at
             # baseline, so the model adds topology only where it helps.
             nn.init.constant_(self.gate_conv.bias, gate_bias)
+        # Warm-start: while `frozen` is True (set from the training loop for
+        # the first N epochs), the topology contribution is IDENTICALLY zero
+        # regardless of gate value. This lets the equivariant backbone converge
+        # first, then unfreezes so the gate can adapt topology on top of an
+        # already-trained baseline.
+        self.frozen = False
 
     def forward(self, x_eqv, structs):
         B, d, M, _ = x_eqv.shape
+        if self.frozen:                              # warm-start: skip topology
+            return x_eqv
         filt_batch = self.filtration(x_eqv, structs)
         graph_vec, node_vec = self.ph(
             filt_batch, device=x_eqv.device,

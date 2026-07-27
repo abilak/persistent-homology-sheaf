@@ -41,8 +41,14 @@ class Trainer(object):
         Trains for the num of epochs in the config.
         :return:
         """
+        warm = int(getattr(self.config.architecture, 'topo_warmup_epochs', 0))
         for cur_epoch in range(self.cur_epoch, self.config.num_epochs, 1):
-            # train epoch
+            # Freeze the topology branch for the first `warm` epochs so the
+            # equivariant baseline converges first; then unfreeze so the gate
+            # can adapt topology to whatever the baseline has learned.
+            for m in getattr(self.model_wrapper.model, 'topo_layers', []) or []:
+                if hasattr(m, 'frozen'):
+                    m.frozen = (cur_epoch < warm)
             train_acc, train_loss = self.train_epoch(cur_epoch)
             self.cur_epoch = cur_epoch
             # validation step
