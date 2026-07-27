@@ -30,6 +30,24 @@ sys.path.insert(0, os.path.join(os.getcwd(), 'experiments_rebuttal'))
 from srg_graphs import (rook_graph, shrikhande_graph, triangular_graph,
                         chang_graphs, paley_graph, latin_square_L3_5)
 import networkx as nx
+
+
+def csl(N, S):
+    """Circular Skip Links graph on N vertices with skip S. 4-regular.
+    Every CSL(N, S) is 1-WL-equivalent to every other CSL(N, S') --
+    message-passing GNNs (GCN, GIN, MLP-on-node-features) cannot
+    distinguish them (10% chance on 10-class CSL). 3-WL suffices.
+    Standard CSL benchmark: N = 41, S in {2, 3, 4, 5, 6, 9, 11, 12, 13, 16}."""
+    G = nx.Graph()
+    G.add_nodes_from(range(N))
+    for i in range(N):
+        G.add_edge(i, (i + 1) % N)
+        G.add_edge(i, (i + S) % N)
+    return G
+
+
+def csl_dataset(N=41, skips=(2, 3, 4, 5, 6, 9, 11, 12, 13, 16)):
+    return [csl(N, S) for S in skips]
 from models.base_model import BaseModel
 from models.baseline_models import BaselineModel
 from utils.device import get_device
@@ -102,6 +120,12 @@ def run(model_type, graphs, n_copies=120, epochs=150, seed=0):
 
 
 TASKS = {
+    # CSL: separates 1-WL from 3-WL. GCN/GIN/MLP (1-WL) -> chance 10%.
+    # PPGN and PPGN+PH (both >=3-WL) -> 100%. This is the standard expressivity
+    # benchmark from Murphy et al. 2019 / Chen et al. 2019.
+    "CSL (10-way, N=41, S in {2,3,4,5,6,9,11,12,13,16})":
+        csl_dataset(),
+    # SRG pairs: separate 3-WL from PPGN+PH. PPGN -> chance, PPGN+PH -> 100%.
     "Rook(4,4) vs Shrikhande [srg(16,6,2,2)]":
         [rook_graph(4), shrikhande_graph()],
     "T(8) vs Chang1/2/3 [srg(28,12,6,4)]":
@@ -111,9 +135,24 @@ TASKS = {
 }
 MODELS = ['mlp', 'gcn', 'gin', 'gsn', 'baseline', 'topo']
 
+
+def _select_tasks(names):
+    """Optional CLI filter: python srg_classification.py CSL SR16."""
+    if not names:
+        return TASKS
+    aliases = {"CSL": "CSL", "SR16": "Rook", "SR28": "T(8)",
+               "SR25": "Paley(25)", "SR49": "Paley(49)"}
+    keys = []
+    for name in names:
+        needle = aliases.get(name, name)
+        keys += [k for k in TASKS if needle in k]
+    return {k: TASKS[k] for k in keys}
+
+
 if __name__ == '__main__':
+    tasks = _select_tasks([a for a in sys.argv[1:] if not a.startswith('-')])
     results = {}
-    for task, graphs in TASKS.items():
+    for task, graphs in tasks.items():
         print("=" * 82)
         print(f"{task}   ({len(graphs)}-way, chance = {100/len(graphs):.1f}%)")
         print("=" * 82)
