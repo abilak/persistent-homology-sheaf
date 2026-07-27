@@ -91,6 +91,14 @@ PLANS = {
                         for s in range(5)
                         for m in ["baseline", "topo"]
                         for f in range(1, 11)],
+    # PTC topo SAFE at the tuned lr, matched to the baseline_lr1e-3 pool above.
+    # variant tag chosen so aggregate.py treats it as topo@lr1e-3, matching
+    # the baseline pool exactly.
+    "ptc_safe_lr1e-3": [dict(dataset="PTC", model="topo", seed=s, fold=f,
+                             epochs=None, variant="safe_v2",
+                             overrides=dict(SAFE, learning_rate=1e-3))
+                        for s in range(5)
+                        for f in range(1, 11)],
     # SAFE topology on the small datasets at their tuned lr, matched against
     # the baseline at the same lr. MUTAG's paper lr (5e-4) is already best;
     # PTC's tuned lr is 1e-3.
