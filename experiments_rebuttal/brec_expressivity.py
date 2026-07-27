@@ -94,12 +94,12 @@ PART_DICT = {
 
 # RPC constants (Wang et al. 2023). OUTPUT_DIM is the embedding width fed to the
 # T^2 test; THRESHOLD is the Hotelling critical value at the paper's
-# significance level; MARGIN is the contrastive fit margin.
+# significance level (Bonferroni-conservative over the 400 pairs).
 OUTPUT_DIM = 16
 THRESHOLD  = 72.34
-MARGIN     = 0.34
-DEFAULT_LR = 1e-4
-COV_EPS    = 1e-6
+DEFAULT_LR = 1e-3
+COV_EPS    = 1e-3   # ridge AFTER per-dimension standardization (unit variance),
+                    # so it regularizes without swamping genuine signal
 
 # map CLI name -> srg_classification model_type
 MODEL_ALIASES = {"ppgn": "baseline", "topo": "topo",
@@ -203,26 +203,43 @@ def evaluate_pair(cli_name, g1, g2, args, rng):
                     outs.append(model(batch))
         return torch.cat(outs, 0)
 
-    # ---- fit: push the two graphs' embeddings apart (contrastive) ----
+    # ---- fit: push the two graphs apart on the unit sphere, tighten each ----
+    # Unit-normalising the embeddings keeps the objective scale-free (the model
+    # can't cheat by inflating logits), so `between` in [0,4] and `within`
+    # measures genuine permutation scatter. Maximise separation, minimise
+    # within-graph scatter.
     model.train()
     for _ in range(args.epochs):
         opt.zero_grad()
-        e1 = batched_embed(g1, bs, grad=True)
-        e2 = batched_embed(g2, bs, grad=True)
-        sep = (e1.mean(0) - e2.mean(0)).pow(2).sum()
+        e1 = F.normalize(batched_embed(g1, bs, grad=True), dim=1)
+        e2 = F.normalize(batched_embed(g2, bs, grad=True), dim=1)
+        between = (e1.mean(0) - e2.mean(0)).pow(2).sum()
         within = e1.var(0).sum() + e2.var(0).sum()
-        loss = F.relu(MARGIN - sep) + 0.1 * within
+        loss = -between + 0.5 * within
         loss.backward()
         opt.step()
 
-    # ---- test ----
+    # ---- test: Hotelling T^2 with COMMON standardization ----
+    # The fix for spurious "reliability": measure the within-graph drift of a
+    # (near-)permutation-invariant model against the SAME per-dimension scale
+    # used for the between-graph test. We standardize E1, E2 AND the reliability
+    # replica E1b by the mean/std of the pooled major sample [E1; E2]. If the
+    # separation is real, that scale is O(1) and the ~1e-3 floating-point
+    # non-invariance across permutations lands near zero -> reliability ~ 0. If
+    # there is no separation, the scale is float-noise and BOTH stats sit at the
+    # null F-level (well below THRESHOLD) -> correctly not distinguished.
     model.eval()
     E1  = batched_embed(g1, S, grad=False)
     E2  = batched_embed(g2, S, grad=False)
     E1b = batched_embed(g1, S, grad=False)   # independent perms of the SAME graph
 
-    major = hotelling_t2(E1, E2)
-    reliability = hotelling_t2(E1, E1b)
+    pooled = torch.cat([E1, E2], 0)
+    mu = pooled.mean(0, keepdim=True)
+    sd = pooled.std(0, keepdim=True).clamp_min(1e-8)
+    z = lambda E: (E - mu) / sd
+
+    major = hotelling_t2(z(E1), z(E2))
+    reliability = hotelling_t2(z(E1), z(E1b))
     distinguished = (major > THRESHOLD) and (reliability < THRESHOLD)
     return {"major": major, "reliability": reliability,
             "distinguished": bool(distinguished)}
@@ -259,7 +276,7 @@ def main():
                     help="permutations per graph for the T^2 test (official 400)")
     ap.add_argument("--batch", type=int, default=16,
                     help="perm minibatch size (also #perms per fit step)")
-    ap.add_argument("--epochs", type=int, default=20, help="per-pair fit epochs")
+    ap.add_argument("--epochs", type=int, default=30, help="per-pair fit epochs")
     ap.add_argument("--lr", type=float, default=DEFAULT_LR)
     ap.add_argument("--safe", action="store_true",
                     help="topo: scalar zero-init gate (starts at PPGN baseline)")

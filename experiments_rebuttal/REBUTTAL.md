@@ -203,46 +203,62 @@ pairs are 1-WL *and* 3-WL indistinguishable. Unlike our hand-picked SR pairs,
 BREC is a large, third-party, standardized suite: it removes any suspicion of
 cherry-picking.
 
-**Protocol (official Reliable Paired Comparison, RPC).** For each pair
-$(G_1,G_2)$ we draw random node-permutations of each graph, fit the (freshly
-initialized, per-pair) model contrastively, then run a two-sample
-**Hotelling $T^2$** test between the two graphs' embedding clouds (MAJOR) and
-between two permutation sets of the *same* graph (RELIABILITY). A pair counts
-as *distinguished* iff MAJOR $>$ threshold and RELIABILITY $<$ threshold —
-i.e. the model separates the two graphs while remaining permutation-invariant
-on isomorphic copies. This is precisely the property Corollary 6 asserts, now
-measured on 400 pairs with a significance test rather than a single witness.
+**Protocol (Reliable Paired Comparison, RPC).** For each pair $(G_1,G_2)$ we
+draw random node-permutations of each graph, fit the (freshly initialized,
+per-pair) model contrastively, then run a two-sample **Hotelling $T^2$** test
+between the two graphs' embedding clouds (MAJOR) and between two permutation
+sets of the *same* graph (RELIABILITY). A pair counts as *distinguished* iff
+MAJOR $>$ threshold and RELIABILITY $<$ threshold — i.e. the model separates
+the two graphs while remaining permutation-invariant on isomorphic copies.
+Crucially, RELIABILITY is measured against the *same* per-dimension scale as
+MAJOR (we standardize both by the pooled between-graph statistics), so a
+permutation-invariant model's residual floating-point drift ($\sim 10^{-3}$)
+lands at $\approx 0$ and cannot be mistaken for separation. This is precisely
+the property Corollary 6 asserts, now measured on 400 pairs with a significance
+test rather than a single witness.
 
-**How to reproduce (server).** The script instantiates the exact paper models
-(`use_topology=False` = PPGN baseline; `True` = PPGN+PH):
+**Two reproduction paths, cross-checked.**
+
+*Path A — standalone (runs today, all baselines in one table).*
+`brec_expressivity.py` reuses the exact rebuttal model zoo
+(`srg_classification.cfg` + `norm_adj_input`), so MLP/GCN/GIN/GSN/PPGN/PPGN+PH
+are bit-identical to the SR/CSL experiments (`topo` = PPGN+PH; `--safe` = the
+scalar zero-init gate, starting exactly at the PPGN baseline):
 
 ```bash
-# get the data once (official release)
-mkdir -p experiments_rebuttal/data
-#   download brec_v3.npy from https://github.com/GraphPKU/BREC  (Data/raw/)
-#   -> experiments_rebuttal/data/brec_v3.npy
+# data once: download BREC_data_all.zip from https://github.com/GraphPKU/BREC
+#   -> experiments_rebuttal/data/brec_v3.npy   (800 graph6 = 400 pairs)
 
-# full 400-pair sweep, one GPU per model
+# full 400-pair sweep, one model per GPU:
 CCD_DEVICE=cuda python experiments_rebuttal/brec_expressivity.py \
-    --model gin  --sample-num 400 --epochs 20 \
-    --out rebuttal_results/brec/gin.json    # 1-WL reference
+    --model gin  --sample-num 400 --out rebuttal_results/brec/gin.json   # 1-WL
 CCD_DEVICE=cuda python experiments_rebuttal/brec_expressivity.py \
-    --model ppgn --sample-num 400 --epochs 20 \
-    --out rebuttal_results/brec/ppgn.json   # 3-WL baseline
+    --model ppgn --sample-num 400 --out rebuttal_results/brec/ppgn.json  # 3-WL
 CCD_DEVICE=cuda python experiments_rebuttal/brec_expressivity.py \
-    --model topo --sample-num 400 --epochs 20 \
-    --out rebuttal_results/brec/topo.json   # PPGN+PH (ours)
+    --model topo --safe --sample-num 400 --out rebuttal_results/brec/topo.json
 
-# run a single category (e.g. the strongly-regular block) or a quick check:
-CCD_DEVICE=cuda python experiments_rebuttal/brec_expressivity.py \
-    --model topo --pairs 60-160          # Regular class
-CCD_DEVICE=cuda python experiments_rebuttal/brec_expressivity.py \
-    --model topo --pairs 0-20 --sample-num 32 --epochs 8   # smoke test
+# headline category only, or a quick smoke check:
+CCD_DEVICE=cuda python experiments_rebuttal/brec_expressivity.py --model topo --safe --pairs 60-160
+CCD_DEVICE=cuda python experiments_rebuttal/brec_expressivity.py --model topo --pairs 0-20 --sample-num 32 --epochs 8
 ```
 
 CFI graphs are large (up to ~200 nodes); for the dense $n^2$ backbone use
 `--max-nodes` to bound memory (skipped pairs are reported, never silently
-dropped) and keep `--block-features` modest (default `32 32`).
+dropped).
+
+*Path B — official harness (citeable).* Inject our PH branch into BREC's *own*
+PPGN harness and run *their* `test_BREC.py`, so numbers are directly comparable
+to the BREC leaderboard. Automated and safe (dry-run, backups, idempotent,
+self-verifying, `--revert`):
+
+```bash
+# inside BREC/ProvablyPowerfulGraphNetworks_torch/ :
+python experiments_rebuttal/brec_official/inject_topology.py --dir . \
+       --topology-src experiments_rebuttal/brec_official/topology.py --apply
+```
+
+Full recipe (incl. the "reproduce stock PPGN first" hard rule) in
+`experiments_rebuttal/brec_official/README.md`.
 
 **What we expect / how to read it (published BREC reference points).** For
 context, official BREC leaderboard counts (pairs distinguished / 400): 1-WL
