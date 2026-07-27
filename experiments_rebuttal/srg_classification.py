@@ -55,12 +55,22 @@ from utils.device import get_device
 DEV = get_device()
 
 
+SAFE_GATE = False   # set by --safe: topo uses a scalar gate initialized to 0,
+                    # so PPGN+PH starts EXACTLY at the PPGN baseline and only
+                    # engages topology if the gradient says it helps. This makes
+                    # a single config behave well both where topology is needed
+                    # (SR pairs) and where the baseline already suffices (CSL).
+
+
 def cfg(num_classes, model_type):
     arch = dict(block_features=[64, 64], depth_of_mlp=2, new_suffix=True,
                 use_topology=False, topo_hidden_dim=32, topo_max_ph_dim=2,
                 topo_num_stats=16, topo_max_simplex_dim=3)  # dim3 => 4-cliques
     if model_type == 'topo':
         arch['use_topology'] = True
+        if SAFE_GATE:
+            arch['topo_gate_mode'] = 'scalar'
+            arch['topo_gate_init'] = 0.0
     elif model_type in ('gcn', 'gin', 'mlp', 'gsn'):
         arch['baseline_type'] = model_type
     return EasyDict(dict(architecture=arch, node_labels=0,
@@ -157,6 +167,8 @@ def _parse_int_flag(name, default):
 
 
 if __name__ == '__main__':
+    if '--safe' in sys.argv:
+        SAFE_GATE = True
     tasks = _select_tasks([a for a in sys.argv[1:] if not a.startswith('-')])
     N_SEEDS = _parse_int_flag("seeds", 1)
     N_EPOCHS = _parse_int_flag("epochs", 150)
