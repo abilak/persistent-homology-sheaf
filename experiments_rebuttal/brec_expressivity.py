@@ -146,6 +146,28 @@ def load_brec_graphs(path):
     return graphs
 
 
+def detect_pair_stride(graphs, max_scan=2048):
+    """Some BREC dumps are 'pair-major': each real pair is stored as R
+    consecutive permuted instances (e.g. 51200 = 400 pairs x 64 instances x 2
+    graphs). Return R = number of consecutive storage-pairs isomorphic to
+    storage-pair 0 (R = 1 if pairs are already distinct). Cheap: node-count
+    guards short-circuit, and pair 0 is small."""
+    def pair(p):
+        return graphs[2 * p], graphs[2 * p + 1]
+    g0a, g0b = pair(0)
+    total = len(graphs) // 2
+    R = 1
+    while R < min(max_scan, total):
+        ga, gb = pair(R)
+        same = (ga.number_of_nodes() == g0a.number_of_nodes()
+                and gb.number_of_nodes() == g0b.number_of_nodes()
+                and nx.is_isomorphic(ga, g0a) and nx.is_isomorphic(gb, g0b))
+        if not same:
+            break
+        R += 1
+    return R
+
+
 def make_perm_batch(G, num, rng):
     """Stack `num` random node-permutations -> (num, 1, n, n) via the SAME
     normalized-adjacency encoding the SR/CSL experiments use."""
@@ -271,7 +293,10 @@ def main():
                          "topo (PPGN+PH, ours)")
     ap.add_argument("--data", default=None, help="path to brec_v3.npy / .g6")
     ap.add_argument("--pairs", default=None,
-                    help="'lo-hi' or comma list of pair indices (default: all)")
+                    help="'lo-hi' or comma list of UNIQUE pair indices (default: all)")
+    ap.add_argument("--pair-stride", type=int, default=0,
+                    help="instances per real pair for pair-major dumps "
+                         "(0 = auto-detect; 1 = pairs already distinct)")
     ap.add_argument("--sample-num", type=int, default=32,
                     help="permutations per graph for the T^2 test (official 400)")
     ap.add_argument("--batch", type=int, default=16,
@@ -295,15 +320,28 @@ def main():
     data_path = args.data or _default_data_path()
     graphs = load_brec_graphs(data_path)
     total_pairs = len(graphs) // 2
-    print(f"Loaded {len(graphs)} graphs = {total_pairs} pairs from {data_path}")
+    print(f"Loaded {len(graphs)} graphs = {total_pairs} storage-pairs "
+          f"from {data_path}")
+
+    # collapse pair-major permutation blocks to the unique pairs
+    stride = args.pair_stride or detect_pair_stride(graphs)
+    num_pairs = total_pairs // stride
+    if stride > 1:
+        note = "" if total_pairs % stride == 0 else \
+            f"  [WARN: {total_pairs} not divisible by {stride}]"
+        print(f"Pair-major layout: {stride} permuted instances/pair "
+              f"-> {num_pairs} UNIQUE pairs (using first instance of each).{note}")
+    else:
+        print(f"Distinct pairs: {num_pairs}")
     print(f"Device: {DEV} | model: {args.model} | safe={args.safe} | "
           f"sample_num={args.sample_num} epochs={args.epochs}")
 
-    pair_ids = parse_pairs_arg(args.pairs, total_pairs)
+    pair_ids = parse_pairs_arg(args.pairs, num_pairs)
     per_cat, records, skipped = {}, [], 0
     t_start = time.time()
-    for pid in pair_ids:
-        g1, g2 = graphs[2 * pid], graphs[2 * pid + 1]
+    for pid in pair_ids:                        # pid = UNIQUE pair index
+        sp = pid * stride                        # -> storage-pair index
+        g1, g2 = graphs[2 * sp], graphs[2 * sp + 1]
         n = max(g1.number_of_nodes(), g2.number_of_nodes())
         if args.max_nodes and n > args.max_nodes:
             skipped += 1
