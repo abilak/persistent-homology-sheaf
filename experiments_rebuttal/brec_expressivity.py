@@ -146,12 +146,25 @@ def load_brec_graphs(path):
     return graphs
 
 
+def _same_unordered_pair(a1, a2, b1, b2):
+    """True if {a1,a2} and {b1,b2} are the same graph pair up to isomorphism,
+    IGNORING order (BREC dumps store some instances with the two graphs
+    swapped). Node-count guards short-circuit the expensive iso checks."""
+    n = lambda g: g.number_of_nodes()
+    straight = (n(a1) == n(b1) and n(a2) == n(b2)
+                and nx.is_isomorphic(a1, b1) and nx.is_isomorphic(a2, b2))
+    if straight:
+        return True
+    return (n(a1) == n(b2) and n(a2) == n(b1)
+            and nx.is_isomorphic(a1, b2) and nx.is_isomorphic(a2, b1))
+
+
 def detect_pair_stride(graphs, max_scan=2048):
     """Some BREC dumps are 'pair-major': each real pair is stored as R
     consecutive permuted instances (e.g. 51200 = 400 pairs x 64 instances x 2
-    graphs). Return R = number of consecutive storage-pairs isomorphic to
-    storage-pair 0 (R = 1 if pairs are already distinct). Cheap: node-count
-    guards short-circuit, and pair 0 is small."""
+    graphs), and instances may swap the order of the two graphs. Return R =
+    number of consecutive storage-pairs that are the SAME unordered pair as
+    storage-pair 0 (R = 1 if pairs are already distinct)."""
     def pair(p):
         return graphs[2 * p], graphs[2 * p + 1]
     g0a, g0b = pair(0)
@@ -159,10 +172,7 @@ def detect_pair_stride(graphs, max_scan=2048):
     R = 1
     while R < min(max_scan, total):
         ga, gb = pair(R)
-        same = (ga.number_of_nodes() == g0a.number_of_nodes()
-                and gb.number_of_nodes() == g0b.number_of_nodes()
-                and nx.is_isomorphic(ga, g0a) and nx.is_isomorphic(gb, g0b))
-        if not same:
+        if not _same_unordered_pair(ga, gb, g0a, g0b):
             break
         R += 1
     return R

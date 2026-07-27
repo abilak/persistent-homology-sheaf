@@ -97,26 +97,38 @@ def main():
             break
     print(f"  smallest stride with G[0] reappearing: {stride}"
           + (f"  (scanned first {limit})" if stride is None else ""))
-    if stride:
-        # verify the whole pair repeats at this stride
-        gpair = (to_graph(flat[stride]), to_graph(flat[stride + 1]))
-        pair_repeats = nx.is_isomorphic(G[0], gpair[0]) and \
-            nx.is_isomorphic(G[1], gpair[1])
-        print(f"  pair 0 repeats at stride {stride}? {pair_repeats}")
-        if pair_repeats and L % stride == 0:
-            uniq_graphs = stride
-            print(f"\n=> LAYOUT: {L // stride} permutation-blocks of "
-                  f"{stride} graphs. {uniq_graphs // 2} UNIQUE pairs.")
-            print(f"=> FIX: evaluate only the first block -> "
-                  f"`--pairs 0-{uniq_graphs // 2}` "
-                  f"(categories map correctly to those {uniq_graphs // 2} "
-                  f"pairs).")
-        elif not pair_repeats:
-            print("  (graph 0 recurs but the PAIR doesn't repeat at that "
-                  "stride -- paste this and I'll match the loader.)")
+    # UNORDERED run length: how many consecutive storage-pairs are the same
+    # unordered pair {G1,G2} as storage-pair 0 (instances may swap the two
+    # graphs' order). This is the true instances-per-pair R the loader uses.
+    def same_unordered(a1, a2, b1, b2):
+        nn = lambda g: g.number_of_nodes()
+        if nn(a1) == nn(b1) and nn(a2) == nn(b2) \
+                and nx.is_isomorphic(a1, b1) and nx.is_isomorphic(a2, b2):
+            return True
+        return (nn(a1) == nn(b2) and nn(a2) == nn(b1)
+                and nx.is_isomorphic(a1, b2) and nx.is_isomorphic(a2, b1))
+
+    p0a = to_graph(flat[0]); p0b = to_graph(flat[1])
+    R = 1
+    while 2 * R + 1 < L and R < 4000:
+        qa = to_graph(flat[2 * R]); qb = to_graph(flat[2 * R + 1])
+        if not same_unordered(qa, qb, p0a, p0b):
+            break
+        R += 1
+    n_unique = (L // 2) // R if R else L // 2
+    print(f"\n  UNORDERED instances-per-pair R = {R}  ->  {n_unique} unique pairs")
+    if L % (2 * R) == 0:
+        print(f"=> LAYOUT: {n_unique} unique pairs, each stored as {R} permuted "
+              f"instances (some order-swapped).")
+        print(f"=> The loader auto-detects this (unordered stride) and "
+              f"collapses to {n_unique} pairs. Expect ~400 for standard BREC.")
+        if n_unique == 400:
+            print("=> 400 pairs — matches canonical BREC. Category ranges align.")
+        else:
+            print(f"=> NOTE: {n_unique} != 400. If not canonical BREC, paste "
+                  f"this so we can confirm the category map.")
     else:
-        print("  => no repeat found: looks like genuinely distinct pairs; "
-              "consecutive pairing is correct as-is.")
+        print(f"  (L not divisible by 2R={2*R}; paste this and I'll adjust.)")
 
 
 if __name__ == "__main__":
