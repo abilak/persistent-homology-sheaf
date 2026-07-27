@@ -53,6 +53,11 @@ PLANS = {
     # subgraph-counting baseline (GSN) on the small datasets, same protocol
     "gsn_small": list(jobs_for(["MUTAG", "PTC"], ["gsn"],
                               [0, 1, 2, 3, 4], range(1, 11))),
+    # cheap same-code baselines on the mid-size datasets (PROTEINS is what the
+    # paper reports; NCI109 fills the second column that CIN also reports)
+    "cheap_mid": list(jobs_for(["PROTEINS", "NCI109"],
+                              ["mlp", "gcn", "gin", "gsn"],
+                              [0, 1, 2, 3, 4], range(1, 11))),
     # light baselines on big datasets (cheap): 5 seeds
     "big_light": list(jobs_for(["NCI1", "NCI109"],
                               ["gcn", "gin", "mlp", "gsn"],
