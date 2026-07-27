@@ -99,6 +99,14 @@ PLANS = {
                              overrides=dict(SAFE, learning_rate=1e-3))
                         for s in range(5)
                         for f in range(1, 11)],
+    # matching safe01 (gate_init=0.1) run so we can compare "topology-off-at-init"
+    # vs "topology-slightly-on-at-init" at the fair lr
+    "ptc_safe01_lr1e-3": [dict(dataset="PTC", model="topo", seed=s, fold=f,
+                               epochs=None, variant="safe01",
+                               overrides=dict(SAFE, learning_rate=1e-3,
+                                              topo_gate_init=0.1))
+                          for s in range(5)
+                          for f in range(1, 11)],
     # SAFE topology on the small datasets at their tuned lr, matched against
     # the baseline at the same lr. MUTAG's paper lr (5e-4) is already best;
     # PTC's tuned lr is 1e-3.
