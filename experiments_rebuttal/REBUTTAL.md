@@ -46,11 +46,13 @@ is a hard expressivity ceiling measured in accuracy, not overfitting.
 
 | task | chance | MLP | GCN | GIN | GSN | PPGN | **PPGN+PH** |
 |---|---|---|---|---|---|---|---|
-| Rook(4,4) vs Shrikhande [srg(16,6,2,2)] | 50.0% | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | **100 / 100** |
-| T(8) vs Chang_{1,2,3} [srg(28,12,6,4)]  | 25.0% | 25.5/28.1 | 25.5/28.1 | 25.5/22.9 | 25.0/25.0 | 25.5/28.1 | **69.0 / 72.9** |
-| Paley(25) vs L3(5) [srg(25,12,5,6)]     | 50.0% | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/45.8 | **56.2 / 68.8** |
+| Rook(4,4) vs Shrikhande [srg(16,6,2,2)] | 50.0% | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | **89.6 / 91.7** |
+| T(8) vs Chang_{1,2,3} [srg(28,12,6,4)]  | 25.0% | 25.5/25.0 | 25.5/25.0 | 25.5/25.0 | 25.0/25.0 | 25.5/28.1 | **43.8 / 43.8** |
+| Paley(25) vs L3(5) [srg(25,12,5,6)]     | 50.0% | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/54.2 | 51.0/45.8 | **58.3 / 58.3** |
 
-*(train / test accuracy in %; 150 epochs, 120 random permutations per graph)*
+*(train / test accuracy in %; 150 epochs, 120 random permutations per graph;
+single-seed GPU run --- multi-seed reruns are strongly recommended to tighten
+these numbers, see `srg_classification.py`.)*
 
 Two hard facts:
 
@@ -125,9 +127,9 @@ graphs. We report train / test accuracy over 150 epochs:
 \toprule
 task (chance) & MLP & GCN & GIN & GSN & PPGN & \textbf{PPGN+PH} \\
 \midrule
-Rook vs Shrikhande (50\%)          & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $\mathbf{100/100}$ \\
-T(8) vs Chang$_{1,2,3}$ (25\%)     & $26/28$  & $26/28$  & $26/23$  & $25/25$  & $26/28$  & $\mathbf{69/73}$ \\
-Paley(25) vs $L_3(5)$ (50\%)       & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $51/46$  & $\mathbf{56/69}$ \\
+Rook vs Shrikhande (50\%)          & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $\mathbf{90/92}$ \\
+T(8) vs Chang$_{1,2,3}$ (25\%)     & $26/25$  & $26/25$  & $26/25$  & $25/25$  & $26/28$  & $\mathbf{44/44}$ \\
+Paley(25) vs $L_3(5)$ (50\%)       & $51/54$  & $51/54$  & $51/54$  & $51/54$  & $51/46$  & $\mathbf{58/58}$ \\
 \bottomrule
 \end{tabular}
 \end{table}

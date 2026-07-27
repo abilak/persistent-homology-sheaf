@@ -149,22 +149,51 @@ def _select_tasks(names):
     return {k: TASKS[k] for k in keys}
 
 
+def _parse_int_flag(name, default):
+    for a in sys.argv[1:]:
+        if a.startswith(f"--{name}="):
+            return int(a.split("=", 1)[1])
+    return default
+
+
 if __name__ == '__main__':
     tasks = _select_tasks([a for a in sys.argv[1:] if not a.startswith('-')])
+    N_SEEDS = _parse_int_flag("seeds", 1)
+    N_EPOCHS = _parse_int_flag("epochs", 150)
+    N_COPIES = _parse_int_flag("copies", 120)
+    print(f"# {N_SEEDS} seed(s), {N_EPOCHS} epochs, {N_COPIES} copies/class\n")
     results = {}
     for task, graphs in tasks.items():
         print("=" * 82)
         print(f"{task}   ({len(graphs)}-way, chance = {100/len(graphs):.1f}%)")
         print("=" * 82)
-        print(f"{'model':<12}{'train acc':<14}{'test acc':<14}")
+        header = f"{'model':<12}{'train (mean/best)':<22}{'test (mean/best)':<22}"
+        if N_SEEDS == 1:
+            header = f"{'model':<12}{'train acc':<14}{'test acc':<14}"
+        print(header)
         results[task] = {}
         for m in MODELS:
             t0 = time.time()
-            tr, te, chance = run(m, graphs)
-            results[task][m] = dict(train=tr, test=te, chance=chance)
-            flag = "  <-- breaks 3-WL" if (m == 'topo' and tr > 0.9) else ""
-            print(f"{m:<12}{tr*100:>6.1f}%       {te*100:>6.1f}%      "
-                  f"({time.time()-t0:.0f}s){flag}")
+            trs, tes = [], []
+            for s in range(N_SEEDS):
+                tr, te, chance = run(m, graphs, n_copies=N_COPIES,
+                                     epochs=N_EPOCHS, seed=s)
+                trs.append(tr); tes.append(te)
+            results[task][m] = dict(train_mean=float(np.mean(trs)),
+                                    train_best=float(np.max(trs)),
+                                    test_mean=float(np.mean(tes)),
+                                    test_best=float(np.max(tes)),
+                                    train_seeds=trs, test_seeds=tes,
+                                    chance=chance)
+            flag = "  <-- breaks WL bound" if (m == 'topo' and max(trs) > 0.9) else ""
+            if N_SEEDS == 1:
+                print(f"{m:<12}{trs[0]*100:>6.1f}%       {tes[0]*100:>6.1f}%      "
+                      f"({time.time()-t0:.0f}s){flag}")
+            else:
+                print(f"{m:<12}"
+                      f"{np.mean(trs)*100:>5.1f}/{np.max(trs)*100:>5.1f}%      "
+                      f"{np.mean(tes)*100:>5.1f}/{np.max(tes)*100:>5.1f}%      "
+                      f"({time.time()-t0:.0f}s){flag}")
         print()
     with open('rebuttal_results/srg_classification.json', 'w') as f:
         json.dump(results, f, indent=2)
