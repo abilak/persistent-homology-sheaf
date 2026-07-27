@@ -117,18 +117,53 @@ def main():
         R += 1
     n_unique = (L // 2) // R if R else L // 2
     print(f"\n  UNORDERED instances-per-pair R = {R}  ->  {n_unique} unique pairs")
-    if L % (2 * R) == 0:
-        print(f"=> LAYOUT: {n_unique} unique pairs, each stored as {R} permuted "
-              f"instances (some order-swapped).")
-        print(f"=> The loader auto-detects this (unordered stride) and "
-              f"collapses to {n_unique} pairs. Expect ~400 for standard BREC.")
-        if n_unique == 400:
-            print("=> 400 pairs — matches canonical BREC. Category ranges align.")
-        else:
-            print(f"=> NOTE: {n_unique} != 400. If not canonical BREC, paste "
-                  f"this so we can confirm the category map.")
-    else:
-        print(f"  (L not divisible by 2R={2*R}; paste this and I'll adjust.)")
+
+    # helper: first instance (storage-pair) of unique pair u
+    def upair(u):
+        sp = u * R
+        return to_graph(flat[2 * sp]), to_graph(flat[2 * sp + 1])
+
+    # (3a) is the stride CONSTANT? measure the run length at a few unique pairs
+    def run_len_at(u, cap=200):
+        a0, b0 = upair(u)
+        sp0 = u * R
+        r = 1
+        while r < cap and 2 * (sp0 + r) + 1 < L:
+            qa = to_graph(flat[2 * (sp0 + r)]); qb = to_graph(flat[2 * (sp0 + r) + 1])
+            if not same_unordered(qa, qb, a0, b0):
+                break
+            r += 1
+        return r
+    checks = [u for u in (0, 1, 2, n_unique // 4, n_unique // 2, n_unique - 2)
+              if 0 <= u < n_unique]
+    runs = {u: run_len_at(u) for u in checks}
+    print(f"  run length at unique-pairs {checks}: {[runs[u] for u in checks]}")
+    print(f"  -> stride {'CONSTANT' if len(set(runs.values()))==1 else 'VARIES (!)'}")
+
+    # (3b) node-size profile of unique pairs (reveals category structure / size)
+    sample_u = sorted(set([u for u in range(0, min(n_unique, 60))]
+                          + list(range(0, n_unique, max(1, n_unique // 20)))
+                          + [n_unique - 1]))
+    print("\n  node-size profile of unique pairs (u: n1/n2):")
+    prof = []
+    for u in sample_u:
+        a, b = upair(u)
+        prof.append((u, a.number_of_nodes(), b.number_of_nodes()))
+    # print compactly, and flag size-jump boundaries
+    line = "  " + "  ".join(f"{u}:{n1}/{n2}" for u, n1, n2 in prof)
+    print(line)
+
+    # (3c) duplication test: is the set two copies of n_unique/2 pairs?
+    if n_unique % 2 == 0:
+        half = n_unique // 2
+        a0, b0 = upair(0)
+        ah, bh = upair(half)
+        dup = same_unordered(a0, b0, ah, bh)
+        print(f"\n  duplication test: unique-pair 0 == unique-pair {half}? {dup}")
+        if dup:
+            print(f"  -> looks like TWO copies of {half} pairs "
+                  f"(so {half} genuinely-unique). Use --pairs 0-{half}.")
+    print("\n(paste this whole block; it pins down pair count + categories.)")
 
 
 if __name__ == "__main__":
