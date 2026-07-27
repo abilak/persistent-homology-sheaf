@@ -144,6 +144,13 @@ PLANS = {
         # gradient says it helps. 1.24-1.29x baseline params (vs 2.9-4.2x).
         + [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
                 variant="safe_lr5e-4", overrides=dict(SAFE, learning_rate=5e-4))
+           for f in range(1, 11)]
+        # gently biased toward "topology matters" without the sigmoid(+2)=0.88
+        # commitment; complementary to safe(0) so we can see the effect of the
+        # initial gate bias in isolation.
+        + [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
+                variant="safe01_lr5e-4",
+                overrides=dict(SAFE, learning_rate=5e-4, topo_gate_init=0.1))
            for f in range(1, 11)]),
     # HP check on NCI1 (seed 0, folds 1-3). Two axes that matter:
     #  - baseline: lr (fair reference).
