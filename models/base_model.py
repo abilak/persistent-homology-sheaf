@@ -52,6 +52,8 @@ class BaseModel(nn.Module):
                 node_level = getattr(config.architecture, 'topo_node_level', True)
                 multiplicity = getattr(config.architecture, 'topo_multiplicity', False)
                 scale_stats = getattr(config.architecture, 'topo_scale_stats', False)
+                gate_mode = getattr(config.architecture, 'topo_gate_mode', 'conv')
+                gate_init = getattr(config.architecture, 'topo_gate_init', 0.0)
                 self.topo_layers.append(
                     TopologyLayer(eqv_features=next_layer_features,
                                   hidden_dim=topo_hidden,
@@ -60,7 +62,9 @@ class BaseModel(nn.Module):
                                   gate_bias=gate_bias,
                                   node_level=node_level,
                                   multiplicity=multiplicity,
-                                  scale_stats=scale_stats)
+                                  scale_stats=scale_stats,
+                                  gate_mode=gate_mode,
+                                  gate_init=gate_init)
                 )
             last_layer_features = next_layer_features
 

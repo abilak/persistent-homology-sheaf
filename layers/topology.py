@@ -469,9 +469,10 @@ class TopologyLayer(nn.Module):
     PH -> broadcast (graph + node level) -> gated residual fusion."""
     def __init__(self, eqv_features, hidden_dim=64, max_ph_dim=1, num_stats=4,
                  gate_bias=2.0, node_level=True, multiplicity=False,
-                 scale_stats=False):
+                 scale_stats=False, gate_mode='conv', gate_init=0.0):
         super().__init__()
         self.node_level = node_level
+        self.gate_mode = gate_mode
         self.filtration = LearnedFiltration(eqv_features, hidden_dim)
         self.ph = DifferentiablePH(max_ph_dim, num_stats,
                                    multiplicity=multiplicity,
@@ -495,12 +496,31 @@ class TopologyLayer(nn.Module):
         nn.init.normal_(self.fusion[2].weight, std=0.01)
         nn.init.zeros_(self.fusion[2].bias)
 
-        self.gate_conv = nn.Conv2d(fuse_in, eqv_features, kernel_size=1, bias=True)
-        nn.init.normal_(self.gate_conv.weight, std=0.01)
-        # gate_bias controls how much topology contributes initially:
-        # +2 -> sigmoid 0.88 (topo strongly on); <=0 -> starts near/at baseline,
-        # so the model can only add topology where it helps (safer).
-        nn.init.constant_(self.gate_conv.bias, gate_bias)
+        if gate_mode == 'scalar':
+            # ReZero-style gate: ONE learnable scalar per layer, initialized to
+            # `gate_init`. With gate_init = 0 the layer computes exactly
+            # x_eqv, so the topology-augmented network's function at
+            # initialization is IDENTICAL to the pure equivariant baseline's;
+            # it can only move away from the baseline if the gradient on the
+            # scalar says topology helps. dL/dalpha = <dL/dout, delta> is
+            # nonzero, so the gate can still switch on.
+            #
+            # This does not touch the hypothesis class -- Theorem 3 and
+            # Corollary 6 are EXISTENCE statements over parameters, and
+            # alpha != 0 is reachable -- so all expressivity claims are
+            # preserved. It also removes the fuse_in x eqv gate convolution,
+            # which is a large share of the topology branch's parameters.
+            self.gate_conv = None
+            self.gate_scalar = nn.Parameter(torch.full((1,), float(gate_init)))
+        else:
+            self.gate_scalar = None
+            self.gate_conv = nn.Conv2d(fuse_in, eqv_features, kernel_size=1,
+                                       bias=True)
+            nn.init.normal_(self.gate_conv.weight, std=0.01)
+            # gate_bias controls how much topology contributes initially:
+            # +2 -> sigmoid 0.88 (topo strongly on); <=0 -> starts near/at
+            # baseline, so the model adds topology only where it helps.
+            nn.init.constant_(self.gate_conv.bias, gate_bias)
 
     def forward(self, x_eqv, structs):
         B, d, M, _ = x_eqv.shape
@@ -520,6 +540,9 @@ class TopologyLayer(nn.Module):
         else:
             combined = torch.cat([x_eqv, graph_bc], dim=1)
 
-        gate = torch.sigmoid(self.gate_conv(combined))
         delta = self.fusion(combined)
+        if self.gate_conv is not None:
+            gate = torch.sigmoid(self.gate_conv(combined))
+        else:
+            gate = self.gate_scalar          # raw scalar: 0 => exactly baseline
         return x_eqv + gate * delta

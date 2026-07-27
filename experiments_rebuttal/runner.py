@@ -14,6 +14,17 @@ PY = os.environ.get("PY", sys.executable)
 RESULTS = os.path.join(ROOT, "rebuttal_results")
 
 
+# "Safe" topology configuration: ReZero scalar gate initialized to 0, so the
+# augmented network starts as EXACTLY the equivariant baseline and can only
+# deviate where the gradient on the gate says topology helps. Topology only
+# after the last block, graph-level features, narrow vectorization -> ~1.25x
+# baseline parameters instead of 3-4x. Expressivity is untouched (Theorem 3 /
+# Corollary 6 are existence results; verified in test_safe_init.py).
+SAFE = {"topo_gate_mode": "scalar", "topo_gate_init": 0.0,
+        "topo_apply_layers": "last", "topo_node_level": False,
+        "topo_num_stats": 8, "topo_hidden_dim": 16}
+
+
 def jobs_for(datasets, models, seeds, folds, epochs=None):
     for ds, m, s, f in itertools.product(datasets, models, seeds, folds):
         yield dict(dataset=ds, model=m, seed=s, fold=f, epochs=epochs)
@@ -80,6 +91,16 @@ PLANS = {
                         for s in range(5)
                         for m in ["baseline", "topo"]
                         for f in range(1, 11)],
+    # SAFE topology on the small datasets at their tuned lr, matched against
+    # the baseline at the same lr. MUTAG's paper lr (5e-4) is already best;
+    # PTC's tuned lr is 1e-3.
+    "safe_small": (
+        [dict(dataset="MUTAG", model="topo", seed=s, fold=f, epochs=None,
+              variant="safe", overrides=dict(SAFE))
+         for s in range(3) for f in range(1, 11)]
+        + [dict(dataset="PTC", model="topo", seed=s, fold=f, epochs=None,
+                variant="safe_lr1e-3", overrides=dict(SAFE, learning_rate=1e-3))
+           for s in range(3) for f in range(1, 11)]),
     "big_heavy_nci1": [dict(dataset="NCI1", model=m, seed=s, fold=f, epochs=None)
                        for s in [0, 1]
                        for m in ["baseline", "topo"]
@@ -109,6 +130,12 @@ PLANS = {
                 overrides={"learning_rate": 5e-4,
                            "topo_gate_bias": 0.0,
                            "topo_node_level": True})
+           for f in range(1, 11)]
+        # SAFE: ReZero scalar gate at 0 -> the network's function at init is
+        # EXACTLY the baseline's, so topology can only be switched on where the
+        # gradient says it helps. 1.24-1.29x baseline params (vs 2.9-4.2x).
+        + [dict(dataset="NCI1", model="topo", seed=0, fold=f, epochs=None,
+                variant="safe_lr5e-4", overrides=dict(SAFE, learning_rate=5e-4))
            for f in range(1, 11)]),
     # HP check on NCI1 (seed 0, folds 1-3). Two axes that matter:
     #  - baseline: lr (fair reference).
