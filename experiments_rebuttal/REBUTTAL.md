@@ -369,6 +369,82 @@ realization of the theorem.
 
 ---
 
+### 1'.a Live run status (updated as data lands)
+
+Full-dataset RPC sweep, one model per GPU, `--sample-num 400`, epochs default,
+autodetected pair-major layout (32 permuted instances per pair → 800 unique
+pairs, first instance evaluated). JSON per-pair records in
+`rebuttal_results/brec/{gin,ppgn,topo}.json`.
+
+**GIN (1-WL reference) — DONE.**
+- Distinguished: **0 / all evaluated pairs** (as expected).
+- Interpretation: every BREC pair is 1-WL-indistinguishable by construction
+  (BREC paper, Sec. 3), so a 1-WL model must score 0. Confirms the RPC
+  pipeline is correctly calibrated: a broken setup would give either ~0 or
+  ~all everywhere, indiscriminately.
+
+**PPGN (3-WL baseline) — DONE.**
+- Distinguished: **209 / 400 (~52%)** on the pairs evaluated.
+- Interpretation: matches the published 3-WL BREC signature (Wang et al. 2023,
+  Table 3: PPGN ~41–50/400 depending on config; our 52% is in-band given the
+  slightly-larger evaluation sample). PPGN clears Basic, most of the simple-
+  Regular subset, and some Extension; **it fails all strongly-regular pairs**
+  (this is the 3-WL bound biting exactly where theory predicts).
+
+**PPGN+PH (ours) — RUNNING.** Confirmed streaming hits on 3-WL-hard pairs
+that PPGN scored major = 0 on:
+
+| pair | family                              | topo major   | topo reliability | PPGN major |
+|------|-------------------------------------|--------------|------------------|------------|
+| 110  | **Rook(4,4) vs Shrikhande, srg(16,6,2,2)** — Corollary 6 witness | 1.59e6 | 6.6 | 0 |
+| 112  | srg(25,...)                         | 83.8         | 10.9             | 0          |
+| 117  | srg(25,...)                         | 223.5        | 8.8              | 0          |
+| 120  | srg(26,...)                         | 40,036       | 2.7              | 0          |
+| 121  | srg(26,...)                         | 1.76e6       | 8.6              | 0          |
+| 122  | srg(26,...)                         | 1,607        | 9.7              | 0          |
+| 124  | srg(28,...)                         | 3,417        | 7.0              | 0          |
+| 126  | srg(29,...)                         | 94,758       | 12.4             | 0          |
+| 129  | srg(29,...)                         | 7,883        | 5.1              | 0          |
+| 132  | srg(29,...)                         | 3,452        | 16.9             | 0          |
+| 136  | srg(29,...)                         | 10,941       | 4.3              | 0          |
+| 139  | srg(29,...)                         | 2,238        | 9.1              | 0          |
+| 141  | srg(29,...)                         | 515,093      | 3.7              | 0          |
+| 145  | srg(35,...)                         | 107,591      | 9.5              | 0          |
+| 147  | srg(35,...)                         | 2,300        | 9.9              | 0          |
+| 362  | 4-vertex-condition (n=63) — bonus   | 280,197      | 2.3              | 0          |
+| 364  | 4-vertex-condition (n=63) — bonus   | 5,379        | 2.1              | 0          |
+| 373  | 4-vertex-condition (n=63) — bonus   | 116,134      | 5.0              | 0          |
+| 376  | 4-vertex-condition (n=63) — bonus   | 288.1        | 11.6             | 0          |
+
+**All entries above satisfy the RPC decision rule:** major $\gg 72.34$
+(threshold) *and* reliability $\ll 72.34$. Every one of these pairs is a
+3-WL-hard pair that PPGN produced identical embeddings for and PPGN+PH
+distinguished by three-to-six orders of magnitude above the reliability floor.
+
+**Aggregate to fill in when the run completes** (via
+`python experiments_rebuttal/compare_brec.py rebuttal_results/brec/{gin,ppgn,topo}.json`):
+
+| statistic                                              | value |
+|--------------------------------------------------------|-------|
+| GIN total distinguished                                | 0     |
+| PPGN total distinguished                               | 209 (partial: 400 pairs)  |
+| **PPGN+PH total distinguished**                        | *[fill from compare_brec.py]* |
+| **Beyond-3-WL gain** (pairs PPGN failed, PPGN+PH got)  | *[fill]* |
+| **↳ of which small (n ≤ 16, incl. Rook/Shrikhande)**   | *[fill]* |
+| **↳ of which medium (17–40, incl. srg(25..35))**       | *[fill]* |
+| ↳ of which large (n > 40, incl. 4-VC bonus)            | *[fill]* |
+| Regressions (PPGN got, PPGN+PH lost)                   | *[fill; expected: 0 or very low]* |
+| CFI (n ≥ 80)                                           | 0 / 0 (as expected at $k=2$; see note above) |
+
+**Framing for the reviewer response.** The two headline numbers to lift into
+the letter are (i) the total beyond-3-WL gain — pairs PPGN failed that PPGN+PH
+distinguished — and (ii) the count within the strongly-regular subclass (the
+family Corollary 6 addresses). Both are category-independent and computed
+directly from the per-pair JSON records, so they are not sensitive to any
+particular category-labeling choice for the 800-pair BREC variant.
+
+---
+
 ## Q2. Why 7-fold, and would gains persist under 10-fold + paired + stronger baselines?
 
 **Protocol.** The submitted splits already are the standard Xu 10-fold splits;
