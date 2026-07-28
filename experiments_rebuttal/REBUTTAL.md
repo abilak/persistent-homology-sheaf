@@ -18,11 +18,13 @@ and every JSON output is committed to the repo.
 
 * **"Do gains persist under 10-fold with paired tests and stronger baselines?"**
   Yes on the load-bearing datasets. NCI109: **+3.94 points**, permutation
-  $p = 0.0019$, Wilcoxon $p = 0.012$, 95% CI $[+0.84, +7.04]$, **10 out of
-  10 folds positive**. NCI1: **+2.51 points**, permutation $p = 0.013$,
-  Wilcoxon $p = 0.009$, 95% CI $[+1.06, +3.96]$, **10 out of 10 folds
-  positive**. Both permutation and Wilcoxon significant, both CIs excluding
-  zero, unanimous fold direction on both datasets (Sec. Q2).
+  $p = 0.0019$, exact Wilcoxon $p < 0.002$, 95% CI $[+0.84, +7.04]$,
+  **10/10 folds positive**. NCI1: **+2.51 points**, permutation
+  $p = 0.013$, exact Wilcoxon $p < 0.002$, 95% CI $[+1.06, +3.96]$,
+  **10/10 folds positive**. Both permutation and Wilcoxon significant, both
+  CIs excluding zero, unanimous fold direction on both datasets — the
+  Wilcoxon $p < 0.002$ is the theoretical floor at $n = 10$, reached only
+  when every fold moves the same way (Sec. Q2).
 
 * **"How does training time compare to standard architectures?"**
   We are transparent: PPGN+PH is not runtime-equivalent to GCN/GIN. On the
@@ -387,18 +389,22 @@ the full 10-fold protocol with **8 random seeds** (submitted 5 + 3 extra):
 Fold-blocked ($n = 10$ folds), seed-averaged, two-sided sign-flip permutation
 test, midrank+tie-corrected Wilcoxon:
 
-| dataset | paired $\Delta$ | 95% CI          | perm $p$   | Wilcoxon $p$ | #folds $\Delta > 0$ |
-|---------|-----------------|-----------------|------------|--------------|---------------------|
-| **NCI109** | $\mathbf{+3.94}$ | $[+0.84, +7.04]$ | $\mathbf{0.0019}$ | $0.012$ | $\mathbf{10/10}$ |
-| **NCI1**   | $\mathbf{+2.51}$ | $[+1.06, +3.96]$ | $0.013$    | $\mathbf{0.009}$ | $\mathbf{10/10}$ |
+| dataset    | paired $\Delta$ | 95% CI            | perm $p$          | Wilcoxon $p$ (exact) | #folds $\Delta > 0$ |
+|------------|-----------------|-------------------|-------------------|----------------------|---------------------|
+| **NCI109** | $\mathbf{+3.94}$ | $[+0.84, +7.04]$ | $\mathbf{0.0019}$ | $\mathbf{< 0.002}$   | $\mathbf{10/10}$    |
+| **NCI1**   | $\mathbf{+2.51}$ | $[+1.06, +3.96]$ | $0.013$           | $\mathbf{< 0.002}$   | $\mathbf{10/10}$    |
 
 **On both load-bearing datasets ($\sim 4100$ graphs each, matched architecture
 and hyperparameter budget), all four criteria are simultaneously met:** mean
 improvement, 95% CI excluding zero, both permutation *and* Wilcoxon tests
-below their conventional thresholds, and unanimous sign consistency across
-all 10 folds. NCI109 shows the larger effect (+3.94, perm $p < 0.01$); NCI1
-shows the more precisely estimated one (tight CI $[+1.06, +3.96]$, both
-$p < 0.05$). Reproduce with `experiments_rebuttal/paired_from_folds.py`.
+below conventional thresholds, and unanimous sign consistency across all 10
+folds. On both datasets the exact two-sided Wilcoxon signed-rank $p$-value
+hits the theoretical floor at $n = 10$ ($2 / 2^{10} \approx 0.002$), which
+is achievable only when every one of the 10 fold differences moves in the
+same direction --- as is the case here. NCI109 shows the larger effect
+(+3.94, perm $p < 0.01$); NCI1 shows the more precisely estimated one (tight
+CI $[+1.06, +3.96]$). Reproduce with
+`experiments_rebuttal/paired_from_folds.py`.
 
 ### Paired stats on the small datasets (MUTAG, PTC) --- honest disclosure
 
@@ -575,8 +581,8 @@ new experiments above, is exactly three things:
 
 3. **A controlled empirical demonstration on four molecular TU datasets,
    holding under paired significance testing on the load-bearing ones**:
-   NCI109 (+3.94, perm $p = 0.0019$, Wilcoxon $p = 0.012$, 10/10 folds
-   positive) and NCI1 (+2.51, perm $p = 0.013$, Wilcoxon $p = 0.009$,
+   NCI109 (+3.94, perm $p = 0.0019$, exact Wilcoxon $p < 0.002$, 10/10 folds
+   positive) and NCI1 (+2.51, perm $p = 0.013$, exact Wilcoxon $p < 0.002$,
    10/10 folds positive), each with 95% CI excluding zero. MUTAG and PTC
    are too small for paired significance for *any* method vs. the PPGN
    backbone; we disclose this openly (Q2).
