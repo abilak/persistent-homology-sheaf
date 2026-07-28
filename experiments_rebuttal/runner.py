@@ -62,6 +62,24 @@ PLANS = {
     "cheap_nci1": list(jobs_for(["NCI1"],
                                ["mlp", "gcn", "gin", "gsn"],
                                [0, 1, 2, 3, 4], range(1, 11))),
+    # PARAMETER-MATCHED BASELINE. The topology branch roughly triples the
+    # parameter count (MUTAG 39.6k -> 123.5k, PTC 12.0k -> 50.7k, NCI1
+    # 45.3k -> 129.3k), so a reviewer can reasonably ask whether the gain is
+    # capacity rather than topology. We widen the *pure equivariant* baseline
+    # until it matches the topology model's parameter count and rerun it under
+    # the identical protocol. If the widened baseline does not close the gap,
+    # the improvement is attributable to persistent homology, not capacity.
+    "param_matched": (
+        [dict(dataset="MUTAG", model="baseline", seed=s, fold=f, epochs=None,
+              variant="wide116", overrides={"block_width": 116})
+         for s in range(5) for f in range(1, 11)]
+        + [dict(dataset="PTC", model="baseline", seed=s, fold=f, epochs=None,
+                variant="wide72", overrides={"block_width": 72})
+           for s in range(5) for f in range(1, 11)]),
+    "param_matched_nci1": [
+        dict(dataset="NCI1", model="baseline", seed=s, fold=f, epochs=None,
+             variant="wide112", overrides={"block_width": 112})
+        for s in range(2) for f in range(1, 11)],
     # light baselines on big datasets (cheap): 5 seeds
     "big_light": list(jobs_for(["NCI1", "NCI109"],
                               ["gcn", "gin", "mlp", "gsn"],
