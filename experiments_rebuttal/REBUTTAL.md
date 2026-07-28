@@ -13,12 +13,12 @@ and every JSON output is committed to the repo.
   subgraph-counting GSN baseline — sits at chance on training accuracy while
   PPGN+PH reaches **100% train and test** on two of three binary tasks
   (Sec. Q1). On the third-party **BREC** benchmark (Wang et al. 2023),
-  under identical Reliable Paired Comparison, **PPGN+PH distinguishes
-  30 more pairs than PPGN (239 vs 209 / 400)**, with the gain concentrated
-  on the strongly-regular block Corollary 6 addresses — including the
-  Rook/Shrikhande pair itself, where PPGN gives byte-identical embeddings
-  and PPGN+PH separates by six orders of magnitude above the reliability
-  floor (Sec. Q1').
+  under identical Reliable Paired Comparison, **PPGN+PH is a strict superset
+  of PPGN — 239 vs 209 / 400 distinguished, +30 beyond-3-WL, and zero
+  regressions** — with the gain concentrated on the strongly-regular block
+  Corollary 6 addresses (including the Rook/Shrikhande pair itself, on which
+  PPGN gives byte-identical embeddings and PPGN+PH separates by six orders
+  of magnitude above the reliability floor) (Sec. Q1').
 
 * **"Do gains persist under 10-fold with paired tests and stronger baselines?"**
   Yes on the load-bearing datasets. NCI109: **+3.94 points**, permutation
@@ -401,7 +401,7 @@ sample; full list in `topo.json`):
 
 | pair | family                              | topo major   | topo reliability | PPGN major |
 |------|-------------------------------------|--------------|------------------|------------|
-| 110  | **Rook(4,4) vs Shrikhande, srg(16,6,2,2)** — Corollary 6 witness | 1.59e6 | 6.6 | 0 |
+| 110  | **Rook(4,4) vs Shrikhande, srg(16,6,2,2)** — Corollary 6 witness | **1.41e6** | 6.6 | 0 |
 | 112  | srg(25,...)                         | 83.8         | 10.9             | 0          |
 | 117  | srg(25,...)                         | 223.5        | 8.8              | 0          |
 | 120  | srg(26,...)                         | 40,036       | 2.7              | 0          |
@@ -436,18 +436,29 @@ rebuttal_results/brec/{gin,ppgn,topo}.json`:
 | PPGN total distinguished                               | **209 / 400**      |
 | **PPGN+PH total distinguished**                        | **239 / 400**      |
 | **Beyond-3-WL gain (pairs PPGN failed, PPGN+PH got)**  | **+30 pairs**      |
-| Regressions (pairs PPGN got that PPGN+PH lost)         | *see compare_brec* (expected 0–low) |
+| **Regressions (pairs PPGN got that PPGN+PH lost)**     | **0 pairs — strict superset** |
 | CFI (n ≥ 80)                                           | 0 / 100 for every model — expected at $k = 2$; see note above |
 
-**Reading the number.** PPGN+PH distinguishes **30 more pairs** than PPGN
-under identical RPC evaluation on the third-party BREC benchmark, on a
-category (strongly-regular / 4-vertex-condition) where PPGN is provably
-capped by the 3-WL bound. The scrolling per-pair records (Sec. 1'.a) confirm
-these gains are concentrated exactly where the theory predicts: on the
-strongly-regular block Corollary 6 addresses (Rook/Shrikhande and its
-srg(25..35) neighbors) plus the 4-vertex-condition family — all pairs on
-which PPGN produces byte-identical embeddings. The gain is not from noise:
-every distinguished pair has reliability $\ll$ major (the RPC decision rule).
+**Reading the numbers.** Two results, one rare and one theory-predicted:
+
+1. **PPGN+PH is a strict superset of PPGN on BREC**: **0 regressions.**
+   Every one of the 209 pairs PPGN distinguishes, PPGN+PH also
+   distinguishes. Adding persistent homology to PPGN never *loses*
+   discriminative power on any BREC pair; it only *adds*. This is not
+   guaranteed by construction (a badly-tuned auxiliary branch could
+   destabilize the shared backbone during the per-pair RPC fit) and is
+   itself evidence that the gate + fusion design is architecturally sound.
+
+2. **PPGN+PH distinguishes 30 more pairs than PPGN** on the third-party
+   BREC benchmark under identical RPC, concentrated exactly where 3-WL is
+   provably capped: on the strongly-regular block Corollary 6 addresses
+   (Rook/Shrikhande and its srg(25..35) neighbors) plus the
+   4-vertex-condition family — all pairs on which PPGN produces byte-
+   identical embeddings. The gain is not from noise: every distinguished
+   pair has reliability $\ll$ major (the RPC decision rule).
+
+Together these read: **PPGN+PH dominates PPGN on BREC** (Pareto strict
+superset), with the 30-pair advantage all in the 3-WL-hard regime.
 
 **Framing for the reviewer response.** The two headline numbers to lift into
 the letter are (i) the total beyond-3-WL gain — pairs PPGN failed that PPGN+PH
@@ -655,14 +666,15 @@ new experiments above, is exactly three things:
      insufficient (byte-identical outputs) yet PH separates (Q1c);
    * the standard CSL 1-WL benchmark, where 1-WL models are pinned at
      10–13% and the whole 3-WL family (PPGN, PPGN+PH) reaches 100% (Q1d);
-   * the third-party gold-standard **BREC** suite (Q1'), where PPGN+PH
-     distinguishes **30 more pairs than PPGN under identical RPC
-     evaluation** (239 vs 209 / 400) — including the exact Rook–Shrikhande
-     pair Corollary 6 uses as its witness, on which PPGN returns byte-
-     identical embeddings (as 3-WL theory predicts) and PPGN+PH returns a
-     separation six orders of magnitude above the reliability floor. The
-     30-pair gain is concentrated on the strongly-regular block and the
-     4-vertex-condition family — exactly where 3-WL is provably capped.
+   * the third-party gold-standard **BREC** suite (Q1'), where PPGN+PH is
+     a **strict superset** of PPGN — **239 vs 209 / 400 distinguished,
+     +30 beyond-3-WL, zero regressions** — including the exact
+     Rook–Shrikhande pair Corollary 6 uses as its witness, on which PPGN
+     returns byte-identical embeddings (as 3-WL theory predicts) and
+     PPGN+PH returns a separation six orders of magnitude above the
+     reliability floor. The +30 gain is concentrated on the
+     strongly-regular block and the 4-vertex-condition family — exactly
+     where 3-WL is provably capped.
 
 2. **A learnable equivariant filtration on $k$-order tensors** whose
    permutation invariance is preserved through every implementation detail
