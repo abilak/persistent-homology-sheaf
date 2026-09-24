@@ -81,10 +81,14 @@ me and I'll fold the final numbers into the rebuttal.
 The topology branch no longer needs the CPU on GPU runs:
 
 * `topo_ph_backend: "auto"` (default) computes persistent homology on the GPU
-  (`layers/torch_ph.py`) whenever the batch's clique complexes are <= 2-dim,
-  homology <= 1 (the TU configuration) and the batch has <= 16 triangles per
-  graph; other batches fall back to gudhi. No host synchronization in the
-  forward or backward pass. Exact vs gudhi (`test_torch_ph.py`).
+  (`layers/torch_ph.py`): clique complexes up to tetrahedra, homology up to
+  dimension 2, essential classes included, via rank-space H0 (bottleneck
+  squarings) and persistent cohomology with clearing + parallel Z/11
+  reduction for H1/H2. Covers every training batch of all six TU datasets;
+  gudhi only for CPU runs or single graphs above a memory cap. Molecular
+  batches run a provably sufficient fixed number of reduction steps (no host
+  sync at all); dense batches (PROTEINS, IMDB-B) check convergence every few
+  steps (one scalar sync each). Exact vs gudhi (`test_torch_ph.py`).
 * `padded_batching: true` batches graphs of similar size with exact masking
   (`test_padded.py`): 2-2.5x fewer steps per epoch. PPGN / PPGN+PH only.
 * Metrics accumulate on device (one sync per epoch); Adam is fused on CUDA.

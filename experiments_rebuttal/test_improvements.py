@@ -145,6 +145,14 @@ def heads_contain_single():
         return (L1(x, structs) - Lm(x, structs)).abs().max().item()
 
 
+def struct_cache_dims():
+    """Regression: the struct cache must key on max_dim (a D=2 complex was
+    silently reused for D=3 requests of the same graph)."""
+    A = nx.to_numpy_array(nx.complete_graph(5)).astype(np.float64)
+    s2 = T.build_graph_structs([A], 2)[0]; s3 = T.build_graph_structs([A], 3)[0]
+    return max(s2.simplex_dim) == 2 and max(s3.simplex_dim) == 3
+
+
 if __name__ == '__main__':
     ok = True
     for kw in [dict(ALL), dict(ALL, node_level=False), dict(essential=True),
@@ -161,6 +169,8 @@ if __name__ == '__main__':
     print(f"essential multiplicities (b0,b1): {ec} [{'OK' if good else 'FAIL'}]")
     sp = squash_pairing(); ok &= sp
     print(f"tanh squash preserves pairing: {sp} [{'OK' if sp else 'FAIL'}]")
+    sc = struct_cache_dims(); ok &= sc
+    print(f"struct cache distinguishes simplex dimension: {sc} [{'OK' if sc else 'FAIL'}]")
     hc = heads_contain_single(); ok &= hc < 1e-5
     print(f"3 heads with extra heads zeroed == 1 head: {hc:.1e} [{'OK' if hc < 1e-5 else 'FAIL'}]")
     print("\nPASS" if ok else "\nFAIL"); sys.exit(0 if ok else 1)

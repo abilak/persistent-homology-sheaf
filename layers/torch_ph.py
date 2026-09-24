@@ -1,63 +1,45 @@
 """
-GPU-resident persistent homology for clique complexes up to dimension 2
-(vertices, edges, triangles), homology in dimensions 0 and 1, including
-essential classes. Pure tensor ops: no host synchronization, so the topology
-branch never stalls the GPU.
+GPU-resident persistent homology of clique complexes (vertices, edges,
+triangles, tetrahedra), homology in dimensions 0, 1, 2, including essential
+classes. Pure tensor ops, no gudhi, no host computation.
 
-Everything is computed in RANK space (a strict total order on each dimension:
-filtration value, ties broken by index), which makes every birth/death simplex
-an exact index; filtration VALUES are then gathered from the differentiable
-filtration tensor, so gradients flow to the same simplices as with gudhi.
-Diagrams (multisets of (birth, death) values) are independent of the tie-break
-and agree with gudhi exactly; only which of several tied simplices receives
-the gradient can differ, as it can between any two valid implementations.
+Everything is computed in RANK space (a strict total order within each
+dimension: filtration value, ties broken by index), so every birth / death
+simplex is an exact index; values are then gathered from the differentiable
+filtration tensor, so gradients reach the same simplices as with gudhi.
+Diagrams (multisets of (birth, death) values) do not depend on the tie-break
+and agree with gudhi exactly (test_torch_ph.py).
 
-  H0: with vertices ordered by rank, the class born at v dies at the first edge
-      that connects v to an OLDER vertex, i.e. at min_{u older} bottleneck(v,u),
-      where bottleneck(v,u) is the minimax edge rank over v-u paths (elder
-      rule). Bottleneck ranks come from ~log2(n) min-max matrix squarings.
-      The dying edges form the minimum spanning forest; all other edges are
-      positive (each creates a 1-cycle).
-  H1: finite pairs from the standard column reduction of the triangle
-      boundary matrix over Z/p (default p = 11, gudhi's default field; the
-      oriented boundary d[a,b,c] = [b,c] - [a,c] + [a,b]), columns in
-      triangle-rank order, rows in edge-rank order, batched over graphs.
-      Positive edges not killed are essential. (Over Z/2 non-orientable
-      subcomplexes carry extra homology, so the field must match gudhi's.)
+  H0  Elder rule via bottleneck distances: the class born at v dies at
+      min_{u older than v} bottleneck(v, u), the minimax edge rank over v-u
+      paths, obtained from ~log2(n) batched min-max squarings. The dying edges
+      form the minimum spanning forest; all other edges are positive.
+  H1  Persistent COHOMOLOGY with clearing (de Silva, Morozov, Vejdemo-Johansson
+      2011; the scheme Ripser uses): reduce the anti-transposed coboundary
+      delta_1 (columns = edges in decreasing rank, rows = triangles in
+      decreasing rank), with the columns of negative edges (the spanning
+      forest, known from H0) cleared. At most the cycle rank m - n + c columns
+      are nonzero, far fewer than the number of triangles on dense graphs.
+      Pairs and essential classes equal those of persistent homology.
+  H2  Same, one dimension up: columns = triangles not paired in H1, rows =
+      tetrahedra.
+Reductions are over Z/p (default p = 11, gudhi's default field; over Z/2
+non-orientable subcomplexes have different homology) and PARALLEL across
+columns (as in OpenPH): every column whose low collides with that of an
+earlier column eliminates it using the leftmost such column, simultaneously.
+Only earlier columns are ever added to later ones, so the result is a valid
+reduction and its pairing is the persistence pairing. If K columns are
+nonzero, the reduction has finished after at most K(K-1)/2 + 1 steps (the
+first j columns are final after sum_{i<j} i steps), so when the host-known
+bound is small a fixed number of steps is run with no synchronization;
+otherwise convergence is checked every few steps (one scalar sync each).
 Zero-persistence pairs are dropped, as gudhi does.
-
-The caller (BatchPlan) decides on the host -- from static graph sizes, with no
-sync -- whether a batch uses this path or the gudhi path.
 """
 import numpy as np
 import torch
 
-
-def _minmax_closure(R, rounds, max_elems=1 << 25):
-    """R (N, n, n) edge ranks (inf = no edge). Repeated min-max squaring:
-    R <- min(R, min_w max(R[:, u, w], R[:, w, v])). After k rounds it covers
-    paths of up to 2^k edges."""
-    N, n, _ = R.shape
-    chunk = max(1, max_elems // max(1, n * n * n))
-    for _ in range(rounds):
-        parts = []
-        for s in range(0, N, chunk):
-            A = R[s:s + chunk]
-            parts.append(torch.maximum(A[:, :, :, None], A[:, None, :, :]).amin(dim=2))
-        R = torch.minimum(R, torch.cat(parts, 0))
-    return R
-
-
-def _stable_rank(values, valid):
-    """rank of each entry within its row under (value, index); invalid -> last.
-    Returns rank (N, K) long and order (N, K) long (order[r] = entry of rank r)."""
-    v = torch.where(valid, values.detach(), torch.full_like(values, float('inf')))
-    order = torch.argsort(v, dim=1, stable=True)
-    rank = torch.empty_like(order)
-    rank.scatter_(1, order, torch.arange(order.shape[1], device=order.device)
-                  .expand_as(order).contiguous())
-    return rank, order
-
+FIXED_STEPS_MAX = 64      # use a sync-free fixed schedule up to this many steps
+CHECK_EVERY = 4           # otherwise check convergence every CHECK_EVERY steps
 
 _CONST = {}
 
@@ -77,133 +59,245 @@ def _key(x):
     return torch.round((x if x.device.type == 'mps' else x.double()) * 1e6)
 
 
+def _minmax_closure(R, rounds, max_elems=1 << 25):
+    """R (N, n, n) edge ranks (inf = no edge). Repeated min-max squaring:
+    R <- min(R, min_w max(R[:, u, w], R[:, w, v])); k rounds cover paths of up
+    to 2^k edges."""
+    N, n, _ = R.shape
+    chunk = max(1, max_elems // max(1, n * n * n))
+    for _ in range(rounds):
+        parts = []
+        for s in range(0, N, chunk):
+            A = R[s:s + chunk]
+            parts.append(torch.maximum(A[:, :, :, None], A[:, None, :, :]).amin(dim=2))
+        R = torch.minimum(R, torch.cat(parts, 0))
+    return R
+
+
+def _stable_rank(values, valid):
+    """rank (N, K) and order (N, K) (order[r] = entry of rank r) under
+    (value, index); invalid entries rank last."""
+    v = torch.where(valid, values.detach(), torch.full_like(values, float('inf')))
+    order = torch.argsort(v, dim=1, stable=True)
+    rank = torch.empty_like(order)
+    rank.scatter_(1, order, torch.arange(order.shape[1], device=order.device)
+                  .expand_as(order).contiguous())
+    return rank, order
+
+
+def _reduce_parallel(Mc, p, k_bound):
+    """Parallel column reduction over Z/p of Mc (N, K, R) (values in [0, p)).
+    Returns low (N, K): index of the lowest nonzero row, -1 for zero columns.
+    k_bound: host-known upper bound on the number of nonzero columns."""
+    N, K, R = Mc.shape
+    dev = Mc.device
+    if K == 0 or R == 0:
+        return torch.full((N, K), -1, dtype=torch.long, device=dev), Mc
+    inv = _const(f'inv{p}', dev, lambda: torch.tensor(
+        [0] + [pow(a, p - 2, p) for a in range(1, p)], dtype=torch.long))
+    rows = torch.arange(1, R + 1, device=dev)
+    colidx = torch.arange(K, device=dev)
+    ridx = torch.arange(R, device=dev)
+
+    def lows(M):
+        return ((M != 0) * rows).amax(dim=2) - 1                        # (N, K)
+
+    def step(M):
+        low = lows(M)
+        lc = low.clamp(min=0)
+        # leftmost column holding each low (dense: no scatter_reduce)
+        hold = (low[:, :, None] == ridx[None, None, :])                  # (N, K, R)
+        first = torch.where(hold, colidx[None, :, None],
+                            torch.full_like(colidx, K)[None, :, None]).amin(dim=1)   # (N, R)
+        piv = first.gather(1, lc)                                          # (N, K)
+        coll = (low >= 0) & (piv < colidx[None, :])
+        pc = M.gather(1, piv.clamp(max=K - 1)[:, :, None].expand(N, K, R))
+        a = M.gather(2, lc[:, :, None])[:, :, 0].long()
+        b = pc.gather(2, lc[:, :, None])[:, :, 0].long()
+        f = ((a * inv[b]) % p).to(M.dtype)
+        M = torch.where(coll[:, :, None], torch.remainder(M - f[:, :, None] * pc, p), M)
+        return M, coll
+
+    steps = k_bound * (k_bound - 1) // 2 + 1
+    if steps <= FIXED_STEPS_MAX:
+        for _ in range(steps):                      # sync-free, provably enough
+            Mc, _ = step(Mc)
+    else:
+        while True:                                 # one scalar sync per CHECK_EVERY
+            for _ in range(CHECK_EVERY):
+                Mc, coll = step(Mc)
+            if not bool(coll.any()):
+                break
+    return lows(Mc), Mc
+
+
+def _reduce_chunked(build, N, K, R, p, k_bound, max_elems):
+    """Build and reduce the (N, K, R) block in chunks of items so that each
+    chunk has <= max_elems entries (memory), concatenating the lows."""
+    c = max(1, max_elems // max(1, K * R))
+    lows = []
+    for s in range(0, N, c):
+        low, _ = _reduce_parallel(build(s, min(N, s + c)), p, k_bound)
+        lows.append(low)
+    return torch.cat(lows, 0)
+
+
+MAX_BLOCK_ELEMS = 1 << 26
+
+
+def _coboundary(n_items, cols_rank, n_cols, rows_rank, n_rows, faces, face_mask, signs):
+    """Anti-transposed coboundary block (N, n_cols, n_rows) over Z/p:
+    column c = (n_cols-1) - rank(face), row r = (n_rows-1) - rank(coface).
+    faces: (N, n_rows_simplices, k) local face ids of each coface simplex;
+    signs: (k,) boundary coefficients mod p."""
+    N = n_items
+    dev = faces.device
+    Rk = rows_rank                                   # (N, Q) rank of each coface
+    Q, k = faces.shape[1], faces.shape[2]
+    col = (n_cols - 1) - cols_rank.gather(1, faces.reshape(N, -1)).reshape(N, Q, k)
+    row = ((n_rows - 1) - Rk)[:, :, None].expand(N, Q, k)
+    val = (signs[None, None, :] * face_mask[:, :, None].long()).expand(N, Q, k)
+    M = torch.zeros(N, n_cols * n_rows, dtype=torch.int16, device=dev)
+    M.scatter_(1, (col * n_rows + row).reshape(N, -1), val.reshape(N, -1).to(torch.int16))
+    return M.reshape(N, n_cols, n_rows)
+
+
 def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
-    """Returns dense pair blocks {(kind, dim): {b, d, valid, inv}} with a
-    fixed candidate axis per item; consumed by DifferentiablePH._vectorize_dense."""
+    """Returns dense pair blocks {(kind, dim): {b, d, valid, inv}} on fixed
+    candidate axes per item; consumed by DifferentiablePH._vectorize_dense."""
     tp = plan.torch_ph
     dev = adj.device
-    N, n, m, T = tp['N'], tp['n'], tp['m'], tp['T']
-    trash = N * P1
+    N, n, m, T, Qn = tp['N'], tp['n'], tp['m'], tp['T'], tp.get('Q', 0)
     INF = float('inf')
-
-    vg, vmask = tp['vg'], tp['vmask']                    # (N, n)
-    eg, emask, ea, eb = tp['eg'], tp['emask'], tp['ea'], tp['eb']   # (N, m)
-    item = tp['item']                                    # (N,) item index
+    vg, vmask = tp['vg'], tp['vmask']
+    eg, emask, ea, eb = tp['eg'], tp['emask'], tp['ea'], tp['eb']
     vv = adj[vg]; ev = adj[eg]
-
-    # ---- ranks -------------------------------------------------------------
     rank_v, _ = _stable_rank(vv, vmask)
     rank_e, order_e = _stable_rank(ev, emask)
+    blocks = {}
 
-    # ---- H0 via bottleneck ranks --------------------------------------------
+    # ---------------- H0 -----------------------------------------------------
     R = torch.full((N, n, n), INF, device=dev)
     if m:
         rv = torch.where(emask, rank_e.to(R.dtype), torch.full_like(ev, INF, dtype=R.dtype))
         bi = torch.arange(N, device=dev)[:, None].expand(N, m)
         R.index_put_((bi, ea, eb), rv); R.index_put_((bi, eb, ea), rv)
-        rounds = max(1, int(np.ceil(np.log2(max(2, n - 1)))))
-        R = _minmax_closure(R, rounds)
-    older = (rank_v[:, None, :] < rank_v[:, :, None]) & vmask[:, None, :]   # [v, u]
-    cand = torch.where(older, R, torch.full_like(R, INF))
-    dr = cand.amin(dim=2)                                                     # (N, n)
+        R = _minmax_closure(R, max(1, int(np.ceil(np.log2(max(2, n - 1))))))
+    older = (rank_v[:, None, :] < rank_v[:, :, None]) & vmask[:, None, :]
+    dr = torch.where(older, R, torch.full_like(R, INF)).amin(dim=2)          # (N, n)
     fin0 = vmask & torch.isfinite(dr)
     ess0 = vmask & ~torch.isfinite(dr)
-    de = order_e.gather(1, torch.where(fin0, dr, torch.zeros_like(dr)).long()
-                        .clamp(max=max(m - 1, 0))) if m else torch.zeros_like(vg)
-    msf = torch.zeros(N, max(m, 1), dtype=torch.bool, device=dev)
     if m:
+        de = order_e.gather(1, torch.where(fin0, dr, torch.zeros_like(dr)).long().clamp(max=m - 1))
         msf = torch.zeros(N, m, dtype=torch.long, device=dev).scatter_add_(
             1, torch.where(fin0, de, torch.zeros_like(de)), fin0.long()) > 0
         msf = msf & emask
-    d0 = ev.gather(1, de) if m else vv
-    fin0 = fin0 & (d0.detach() != vv.detach())            # drop zero persistence
+        d0 = ev.gather(1, de)
+    else:
+        de = torch.zeros_like(vg); msf = torch.zeros(N, 0, dtype=torch.bool, device=dev); d0 = vv
+    fin0 = fin0 & (d0.detach() != vv.detach())
+    blocks[('fin', 0)] = dict(b=vv, d=d0, valid=fin0, _de=de)
+    if essential:
+        blocks[('ess', 0)] = dict(b=vv, valid=ess0)
 
-    # ---- H1 via batched Z/2 reduction of the triangle boundary -------------
-    pos = emask & ~msf[:, :m] if m else emask
-    killed = torch.zeros_like(pos)
-    h1_rows = None
-    if P1 > 1 and T and m:
-        tg, tmask, te = tp['tg'], tp['tmask'], tp['te']              # (N,T), (N,T,3)
+    # ---------------- H1 (cohomology over edges x triangles) ----------------
+    pos_e = emask & ~msf                            # positive edges
+    tri_paired = None
+    if P1 > 1 and m:
+        if T:
+            tg, tmask, te = tp['tg'], tp['tmask'], tp['te']
+            tv = adj[tg]
+            rank_t, order_t = _stable_rank(tv, tmask)
+            sign3 = _const(f's3_{p}', dev, lambda: torch.tensor([1, p - 1, 1]))
+            # clearing: columns of negative (spanning-forest) edges
+            col_pos = pos_e.gather(1, order_e.flip(1))          # column c <-> edge rank m-1-c
+            def build1(a, b):
+                Mc = _coboundary(b - a, rank_e[a:b], m, rank_t[a:b], T, te[a:b], tmask[a:b], sign3)
+                return Mc * col_pos[a:b, :, None].to(Mc.dtype)
+            low = _reduce_chunked(build1, N, m, T, p, tp['K1'], MAX_BLOCK_ELEMS)
+            has = low >= 0
+            e_col = order_e.flip(1)                               # edge local idx of column
+            t_of = order_t.gather(1, ((T - 1) - low).clamp(min=0, max=T - 1))
+            b1, d1 = ev.gather(1, e_col), tv.gather(1, t_of)
+            f1 = has & col_pos & (b1.detach() != d1.detach())
+            blocks[('fin', 1)] = dict(b=b1, d=d1, valid=f1, _e=e_col, _t=t_of, _tv=tv)
+            killed_cols = has
+            tri_paired = torch.zeros(N, T, dtype=torch.long, device=dev).scatter_add_(
+                1, t_of, has.long()) > 0
+            ess1_col = col_pos & ~killed_cols
+            if essential:
+                blocks[('ess', 1)] = dict(b=ev.gather(1, e_col), valid=ess1_col, _e=e_col)
+        elif essential:
+            blocks[('ess', 1)] = dict(b=ev, valid=pos_e, _e=None)
+
+    # ---------------- H2 (cohomology over triangles x tetrahedra) -----------
+    if P1 > 2 and T:
+        tg, tmask = tp['tg'], tp['tmask']
         tv = adj[tg]
         rank_t, order_t = _stable_rank(tv, tmask)
-        te_sorted = te.gather(1, order_t[:, :, None].expand(N, T, 3))   # edges of j-th tri
-        tmask_s = tmask.gather(1, order_t)
-        erank = rank_e.gather(1, te_sorted.reshape(N, -1)).reshape(N, T, 3)
-        # oriented boundary over Z/p: edges (ab, ac, bc) get (+1, -1, +1)
-        sign = _const(f'sign{p}', dev, lambda: torch.tensor([1, p - 1, 1], dtype=torch.long))
-        C = torch.zeros(N, T, m, dtype=torch.long, device=dev)
-        C.scatter_(2, erank, (sign[None, None, :] * tmask_s[:, :, None].long()).expand(N, T, 3).contiguous())
-        inv = _const(f'inv{p}', dev, lambda: torch.tensor([0] + [pow(a, p - 2, p) for a in range(1, p)]))
-        pivot = torch.full((N, m), -1, dtype=torch.long, device=dev)
-        ar = torch.arange(1, m + 1, device=dev)
-        bidx = torch.arange(N, device=dev)
-        lows = torch.full((N, T), -1, dtype=torch.long, device=dev)
-        lowf = lambda c: ((c != 0) * ar).amax(dim=1) - 1
-        for j in range(T):
-            col = C[:, j]
-            for _ in range(j):          # each addition lowers `low`: <= j steps
-                low = lowf(col)
-                lc = low.clamp(min=0)
-                piv = pivot.gather(1, lc[:, None])[:, 0]
-                hit = (low >= 0) & (piv >= 0)
-                pc = C[bidx, piv.clamp(min=0)]                       # pivot column
-                a = col.gather(1, lc[:, None])[:, 0]
-                b = pc.gather(1, lc[:, None])[:, 0]
-                f = (a * inv[b]) % p                                 # eliminate row `low`
-                col = torch.where(hit[:, None], (col - f[:, None] * pc) % p, col)
-            low = lowf(col)
-            C[:, j] = col
-            lows[:, j] = low
+        pos_t = tmask & ~(tri_paired if tri_paired is not None
+                          else torch.zeros_like(tmask))
+        if Qn:
+            qg, qmask, qf = tp['qg'], tp['qmask'], tp['qf']
+            qv = adj[qg]
+            rank_q, order_q = _stable_rank(qv, qmask)
+            sign4 = _const(f's4_{p}', dev, lambda: torch.tensor([1, p - 1, 1, p - 1]))
+            col_pos = pos_t.gather(1, order_t.flip(1))
+            def build2(a, b):
+                Mc = _coboundary(b - a, rank_t[a:b], T, rank_q[a:b], Qn, qf[a:b], qmask[a:b], sign4)
+                return Mc * col_pos[a:b, :, None].to(Mc.dtype)
+            low = _reduce_chunked(build2, N, T, Qn, p, tp['K2'], MAX_BLOCK_ELEMS)
             has = low >= 0
-            lc = low.clamp(min=0)[:, None]
-            pivot.scatter_(1, lc, torch.where(has[:, None], torch.full_like(lc, j),
-                                              pivot.gather(1, lc)))
-        f1 = lows >= 0
-        e_of = order_e.gather(1, lows.clamp(min=0))                      # edge local idx
-        t_of = order_t                                                    # tri local idx
-        b1 = ev.gather(1, e_of); d1 = tv.gather(1, t_of)
-        f1 = f1 & (b1.detach() != d1.detach())
-        killed = torch.zeros(N, m, dtype=torch.long, device=dev).scatter_add_(
-            1, e_of, (lows >= 0).long()) > 0
-        killed = killed & emask
-        h1_rows = (f1, e_of, t_of, tv)
-    ess1 = pos & ~killed if m else pos
+            t_col = order_t.flip(1)
+            q_of = order_q.gather(1, ((Qn - 1) - low).clamp(min=0, max=Qn - 1))
+            b2, d2 = tv.gather(1, t_col), qv.gather(1, q_of)
+            f2 = has & col_pos & (b2.detach() != d2.detach())
+            blocks[('fin', 2)] = dict(b=b2, d=d2, valid=f2, _t2=t_col, _q=q_of, _qv=qv, _tv=tv)
+            if essential:
+                blocks[('ess', 2)] = dict(b=tv.gather(1, t_col), valid=col_pos & ~has,
+                                          _t2=t_col, _tv=tv)
+        elif essential:
+            blocks[('ess', 2)] = dict(b=tv, valid=pos_t, _t2=None, _tv=tv)
 
-    # ---- dense blocks -------------------------------------------------------
-    # Each pair type lives on a fixed candidate axis per item (vertices for H0,
-    # triangles for finite H1, edges for essential H1), with a validity mask.
-    # Consumers pool with masked softmax + batched matmul: no scatter, no
-    # compaction, no host sync.
-    kv, ke = _key(vv), _key(ev)
-    incE = tp['incE']
-    def verts_of_vkey(k):                  # k (N, R) -> (N, R, n) bool
-        return (kv[:, None, :] == k[:, :, None]) & vmask[:, None, :]
-    def verts_of_ekey(k):
-        match = ((ke[:, None, :] == k[:, :, None]) & emask[:, None, :]).to(incE.dtype)
-        return torch.bmm(match, incE) > 0
-
-    blocks = {}   # (kind, dim) -> dict(b=birth value, d=death value or None, valid, inv)
-    inv0 = None
+    # ---------------- tie-merged involved nodes --------------------------------
     if node_level:
-        inv0 = verts_of_vkey(kv)
+        kv, ke = _key(vv), _key(ev)
+        incE = tp['incE']
+        def V(k):                                   # vertices of value-key k (N,R)
+            return (kv[:, None, :] == k[:, :, None]) & vmask[:, None, :]
+        def E(k):
+            mt = ((ke[:, None, :] == k[:, :, None]) & emask[:, None, :]).to(incE.dtype)
+            return torch.bmm(mt, incE) > 0
+        def Tri(k, tv):
+            kt = _key(tv)
+            mt = ((kt[:, None, :] == k[:, :, None]) & tp['tmask'][:, None, :]).to(incE.dtype)
+            return torch.bmm(mt, tp['incT']) > 0
+        def Tet(k, qv):
+            kq = _key(qv)
+            mt = ((kq[:, None, :] == k[:, :, None]) & tp['qmask'][:, None, :]).to(incE.dtype)
+            return torch.bmm(mt, tp['incQ']) > 0
+        b = blocks[('fin', 0)]
+        inv = V(kv)
         if m:
-            inv0 = inv0 | verts_of_ekey(ke.gather(1, de))
-    blocks[('fin', 0)] = dict(b=vv, d=(ev.gather(1, de) if m else vv), valid=fin0, inv=inv0)
-    if essential:
-        blocks[('ess', 0)] = dict(b=vv, valid=ess0,
-                                  inv=verts_of_vkey(kv) if node_level else None)
-    if P1 > 1:
-        if h1_rows is not None:
-            f1, e_of, t_of, tv = h1_rows
-            inv1 = None
-            if node_level:
-                kt = _key(tv)
-                tm = ((kt[:, None, :] == kt.gather(1, t_of)[:, :, None])
-                      & tp['tmask'][:, None, :]).to(incE.dtype)
-                inv1 = verts_of_ekey(ke.gather(1, e_of)) | (torch.bmm(tm, tp['incT']) > 0)
-            blocks[('fin', 1)] = dict(b=ev.gather(1, e_of), d=tv.gather(1, t_of),
-                                      valid=f1, inv=inv1)
-        if essential and m:
-            blocks[('ess', 1)] = dict(b=ev, valid=ess1,
-                                      inv=verts_of_ekey(ke) if node_level else None)
+            inv = inv | E(ke.gather(1, b['_de']))
+        b['inv'] = inv
+        if ('ess', 0) in blocks:
+            blocks[('ess', 0)]['inv'] = V(kv)
+        if ('fin', 1) in blocks:
+            b = blocks[('fin', 1)]
+            b['inv'] = E(ke.gather(1, b['_e'])) | Tri(_key(b['_tv']).gather(1, b['_t']), b['_tv'])
+        if ('ess', 1) in blocks:
+            b = blocks[('ess', 1)]
+            b['inv'] = E(ke if b['_e'] is None else ke.gather(1, b['_e']))
+        if ('fin', 2) in blocks:
+            b = blocks[('fin', 2)]
+            b['inv'] = (Tri(_key(b['_tv']).gather(1, b['_t2']), b['_tv'])
+                        | Tet(_key(b['_qv']).gather(1, b['_q']), b['_qv']))
+        if ('ess', 2) in blocks:
+            b = blocks[('ess', 2)]
+            kt = _key(b['_tv'])
+            b['inv'] = Tri(kt if b['_t2'] is None else kt.gather(1, b['_t2']), b['_tv'])
+    else:
+        for b in blocks.values():
+            b['inv'] = None
     return blocks

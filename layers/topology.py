@@ -54,6 +54,42 @@ def build_clique_complex(adj, max_dim=2):
     return simplices
 
 
+def _simplex_keys(arr, M):
+    """integer key of each row (sorted vertex tuple): big-endian base M, so
+    ascending key order == lexicographic order."""
+    key = np.zeros(len(arr), dtype=np.int64)
+    for c in range(arr.shape[1]):
+        key = key * M + arr[:, c].astype(np.int64)
+    return key
+
+
+def _clique_arrays(adj, max_dim):
+    """Clique complex as per-dimension numpy arrays of sorted vertex tuples in
+    lexicographic order (same enumeration as build_clique_complex)."""
+    A = np.abs(np.asarray(adj)) > 1e-6
+    np.fill_diagonal(A, False)
+    M = A.shape[0]
+    out = {0: np.arange(M, dtype=np.int64)[:, None]}
+    iu, ju = np.nonzero(np.triu(A, 1))                 # row-major -> lexicographic
+    out[1] = np.stack([iu, ju], 1).astype(np.int64) if len(iu) else np.zeros((0, 2), np.int64)
+    prev = out[1]
+    for k in range(2, max_dim + 1):
+        if not len(prev):
+            out[k] = np.zeros((0, k + 1), np.int64); prev = out[k]; continue
+        # common neighbours of all vertices of each (k-1)-simplex, greater
+        # than its last vertex: (n_prev, M) boolean, row-major nonzero keeps
+        # lexicographic order
+        common = np.ones((len(prev), M), dtype=bool)
+        for c in range(prev.shape[1]):
+            common &= A[prev[:, c]]
+        common &= np.arange(M)[None, :] > prev[:, -1:]
+        r, x = np.nonzero(common)
+        out[k] = np.concatenate([prev[r], x[:, None]], 1).astype(np.int64) \
+            if len(r) else np.zeros((0, k + 1), np.int64)
+        prev = out[k]
+    return out
+
+
 def ordered_pairs(sigma):
     """Canonical ordered pairs P(sigma) = sigma x sigma."""
     verts = list(sigma)
@@ -81,51 +117,52 @@ class GraphStruct:
     def __init__(self, adj, max_dim):
         M = adj.shape[0]
         self.M = M
-        comp = build_clique_complex(adj, max_dim=max_dim)
-
+        # Vectorized construction (numpy). Produces exactly the arrays of the
+        # original per-simplex Python loops (test_struct_builder.py): simplices
+        # in lexicographic order within each dimension, dimensions ascending.
+        by_dim_arr = _clique_arrays(adj, max_dim)            # {k: (n_k, k+1)}
+        dims_present = [k for k in sorted(by_dim_arr) if len(by_dim_arr[k])]
         simplices_list = []
-        for dim_k in sorted(comp.keys()):
-            simplices_list.extend(comp[dim_k])
+        offsets = {}
+        for k in sorted(by_dim_arr):
+            offsets[k] = len(simplices_list)
+            simplices_list.extend(map(tuple, by_dim_arr[k].tolist()))
         self.simplices_list = simplices_list
-        self.simplex_to_idx = {tuple(sorted(s)): i
-                               for i, s in enumerate(simplices_list)}
+        self.simplex_to_idx = dict(zip(simplices_list, range(len(simplices_list))))
         self.S = len(simplices_list)
 
-        # gather/scatter indices for f(sigma)=rho(mean_{(i,j) in sigmaxsigma} X_ij).
-        # Pair positions are stored FLAT (i*M + j) so a whole batch can be
-        # gathered with one index into a (B*M*M, d) view.
+        # f(sigma) = rho(mean over sigma x sigma of X_ij): flat pair positions
         f_flat, f_seg, f_counts = [], [], []
-        for s_idx, sigma in enumerate(simplices_list):
-            f_counts.append(len(sigma) * len(sigma))
-            for i in sigma:
-                for j in sigma:
-                    f_flat.append(i * M + j); f_seg.append(s_idx)
-        self.f_flat_cpu = torch.tensor(f_flat, dtype=torch.long)
-        self.f_seg_cpu = torch.tensor(f_seg, dtype=torch.long)
-        self.f_counts_cpu = torch.tensor(f_counts, dtype=torch.float32)
-
-        # face-index tables for the differentiable non-decreasing correction,
-        # keyed BY DIMENSION so tables can be concatenated across a batch
-        # (enumeration matches the reference implementation).
-        by_dim = defaultdict(list)
-        for idx, sigma in enumerate(simplices_list):
-            by_dim[len(sigma) - 1].append(idx)
-        face_tables = {}
-        max_d = max(by_dim.keys()) if by_dim else 0
-        for dim in range(1, max_d + 1):
-            sim_idx_list = by_dim.get(dim, [])
-            if not sim_idx_list:
+        for k in sorted(by_dim_arr):
+            arr = by_dim_arr[k]
+            if not len(arr):
                 continue
-            face_rows = []
-            for idx in sim_idx_list:
-                sigma = simplices_list[idx]
-                row = []
-                for k in range(1, len(sigma)):
-                    for face in combinations(sigma, k):
-                        row.append(self.simplex_to_idx[tuple(sorted(face))])
-                face_rows.append(row)
-            face_tables[dim] = (torch.tensor(sim_idx_list, dtype=torch.long),
-                                torch.tensor(face_rows, dtype=torch.long))
+            n_k, w = arr.shape
+            flat = (arr[:, :, None] * M + arr[:, None, :]).reshape(n_k, w * w)
+            f_flat.append(flat.reshape(-1))
+            f_seg.append(np.repeat(np.arange(n_k) + offsets[k], w * w))
+            f_counts.append(np.full(n_k, w * w, dtype=np.float32))
+        cat = lambda xs, dt: (np.concatenate(xs) if xs else np.zeros(0, dt))
+        self.f_flat_cpu = torch.from_numpy(cat(f_flat, np.int64).astype(np.int64))
+        self.f_seg_cpu = torch.from_numpy(cat(f_seg, np.int64).astype(np.int64))
+        self.f_counts_cpu = torch.from_numpy(cat(f_counts, np.float32).astype(np.float32))
+
+        # face tables: for each simplex of dim k, all proper faces in the
+        # order (size 1 combinations, size 2, ...), looked up by integer key
+        keys = {k: _simplex_keys(by_dim_arr[k], M) for k in by_dim_arr}
+        face_tables = {}
+        for k in sorted(by_dim_arr):
+            arr = by_dim_arr[k]
+            if k == 0 or not len(arr):
+                continue
+            cols = []
+            for size in range(1, k + 1):
+                for pos in combinations(range(k + 1), size):
+                    fk = _simplex_keys(arr[:, list(pos)], M)
+                    loc = np.searchsorted(keys[size - 1], fk)
+                    cols.append(loc + offsets[size - 1])
+            face_tables[k] = (torch.from_numpy(np.arange(len(arr)) + offsets[k]).long(),
+                              torch.from_numpy(np.stack(cols, axis=1)).long())
         self.face_tables_cpu = face_tables
         self._dev_cache = {}
         # for gudhi.SimplexTree.insert_batch: per dimension, a (k+1, n_k)
@@ -133,11 +170,10 @@ class GraphStruct:
         self.tph = None      # static arrays for the torch PH backend (lazy)
         self.simplex_dim = [len(sg) - 1 for sg in simplices_list]
         self.dim_batches = []
-        for dim in sorted(by_dim):
-            idx = np.asarray(by_dim[dim], dtype=np.int64)
-            verts = np.asarray([simplices_list[i] for i in idx],
-                               dtype=np.int32).T.copy()
-            self.dim_batches.append((idx, verts))
+        for k in dims_present:
+            arr = by_dim_arr[k]
+            self.dim_batches.append((np.arange(len(arr), dtype=np.int64) + offsets[k],
+                                     arr.T.astype(np.int32).copy()))
 
     def on(self, device):
         """Return (f_flat, f_seg, f_counts, face_tables{dim:(sim,face)})."""
@@ -156,9 +192,12 @@ _STRUCT_CACHE_MAX = 200000
 
 
 def get_graph_struct(adj, max_dim):
-    """Cache lookup keyed by binary adjacency pattern."""
+    """Cache lookup keyed by binary adjacency pattern AND the maximum simplex
+    dimension (the same graph at D=2 and D=3 has different complexes; keying
+    on the adjacency alone silently reused a complex of the wrong dimension
+    whenever one process mixed dimensions)."""
     adj_bin = (np.abs(adj) > 1e-6)
-    key = (adj_bin.shape[0], adj_bin.astype(np.uint8).tobytes())
+    key = (adj_bin.shape[0], int(max_dim), adj_bin.astype(np.uint8).tobytes())
     st = _STRUCT_CACHE.get(key)
     if st is None:
         st = GraphStruct(adj, max_dim)
@@ -189,15 +228,40 @@ def _tph_static(st):
             elif k == 1:
                 eloc[tuple(sorted(sg))] = len(e_idx)
                 e_idx.append(i); e_end.append(sorted(sg))
+        tloc = {}
         for i, sg in enumerate(st.simplices_list):
             if len(sg) == 3:
                 a, b, c = sorted(sg)
+                tloc[(a, b, c)] = len(t_idx)
                 t_idx.append(i); t_verts.append((a, b, c))
                 t_edges.append((eloc[(a, b)], eloc[(a, c)], eloc[(b, c)]))
+        q_idx, q_faces, q_verts = [], [], []
+        for i, sg in enumerate(st.simplices_list):
+            if len(sg) == 4:
+                a, b, c, d = sorted(sg)
+                q_idx.append(i); q_verts.append((a, b, c, d))
+                # boundary order bcd, acd, abd, abc  (signs +, -, +, -)
+                q_faces.append((tloc[(b, c, d)], tloc[(a, c, d)], tloc[(a, b, d)], tloc[(a, b, c)]))
+        # cycle rank m - n + c (filtration-independent): number of positive
+        # edges, hence of nonzero columns in the H1 cohomology reduction
+        parent = list(range(st.M))
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]; x = parent[x]
+            return x
+        comps = st.M
+        for a, b in e_end:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb; comps -= 1
         vi = np.zeros(st.M, dtype=np.int64)
         for v, i in v_idx:
             vi[v] = i
-        st.tph = dict(v=vi, e=np.asarray(e_idx, np.int64),
+        st.tph = dict(q=np.asarray(q_idx, np.int64),
+                      qfaces=np.asarray(q_faces, np.int64).reshape(-1, 4),
+                      qverts=np.asarray(q_verts, np.int64).reshape(-1, 4),
+                      cyc=len(e_idx) - st.M + comps,
+                      v=vi, e=np.asarray(e_idx, np.int64),
                       eend=np.asarray(e_end, np.int64).reshape(-1, 2),
                       t=np.asarray(t_idx, np.int64),
                       tedges=np.asarray(t_edges, np.int64).reshape(-1, 3),
@@ -206,7 +270,7 @@ def _tph_static(st):
 
 
 class BatchPlan:
-    TORCH_PH_MAX_TRIANGLES = 16      # larger batches -> gudhi path
+    TORCH_PH_MAX_ELEMS = 1 << 26     # per coboundary block; larger -> gudhi path
 
     def __init__(self, structs, device, reps=1, max_ph_dim=1, max_simplex_dim=None,
                  backend='auto', M_pad=None):
@@ -256,13 +320,23 @@ class BatchPlan:
         # torch PH backend eligibility (decided on host: no sync)
         T_max = max((len(_tph_static(st)['t']) for st in structs), default=0) \
             if max_simplex_dim >= 2 else 0
+        Q_max = max((len(_tph_static(st)['q']) for st in structs), default=0) \
+            if max_simplex_dim >= 3 else 0
+        m_max = max((len(_tph_static(st)['e']) for st in structs), default=0)
+        N_items = B * reps
+        # dense coboundary blocks must fit: (items x cols x rows) int16
+        # the reductions run in chunks of items, so only a SINGLE graph's
+        # coboundary block has to fit (plus the batched H0 closure, which is
+        # chunked internally as well)
+        fits = (m_max * T_max <= self.TORCH_PH_MAX_ELEMS and
+                T_max * Q_max <= self.TORCH_PH_MAX_ELEMS)
         self.use_torch_ph = (backend == 'torch' or (backend == 'auto' and device.type != 'cpu')) \
-            and self.same_M and max_ph_dim <= 1 and max_simplex_dim <= 2 \
-            and T_max <= self.TORCH_PH_MAX_TRIANGLES and S_tot > 0
+            and self.same_M and max_ph_dim <= 2 and max_simplex_dim <= 3 \
+            and fits and S_tot > 0
         if backend == 'torch' and not self.use_torch_ph:
             pass    # unsupported config -> falls back to gudhi silently
         if self.use_torch_ph:
-            arrays.update(self._torch_ph_arrays(structs, off, S_tot, reps, T_max))
+            arrays.update(self._torch_ph_arrays(structs, off, S_tot, reps, T_max, Q_max))
         # one pinned, non-blocking host->device copy for everything
         keys = list(arrays)
         flat = np.concatenate([arrays[k].reshape(-1) for k in keys]) if keys else np.zeros(0, np.int64)
@@ -280,10 +354,10 @@ class BatchPlan:
             self.f_counts = self.t['f_counts']
         if self.use_torch_ph:
             tp = dict(self._tph_meta)
-            for k in ('vg', 'eg', 'ea', 'eb', 'tg', 'te', 'item'):
+            for k in ('vg', 'eg', 'ea', 'eb', 'tg', 'te', 'qg', 'qf', 'item'):
                 if k in self.t:
                     tp[k] = self.t[k]
-            for k in ('vmask', 'emask', 'tmask'):
+            for k in ('vmask', 'emask', 'tmask', 'qmask'):
                 if k in self.t:
                     tp[k] = self.t[k].bool()
             N, n, m = tp['N'], tp['n'], tp['m']
@@ -306,9 +380,18 @@ class BatchPlan:
                 for c in range(3):
                     inc.index_put_((bi, ti, self.t['tv'][:, :, c]), w, accumulate=True)
                 tp['incT'] = inc.clamp(max=1)
+            if tp['Q']:
+                Qn = tp['Q']
+                inc = torch.zeros(N, Qn, n, device=device)
+                bi = torch.arange(N, device=device)[:, None].expand(N, Qn)
+                qi = torch.arange(Qn, device=device)[None, :].expand(N, Qn)
+                w = tp['qmask'].to(inc.dtype)
+                for c in range(4):
+                    inc.index_put_((bi, qi, self.t['qv'][:, :, c]), w, accumulate=True)
+                tp['incQ'] = inc.clamp(max=1)
             self.torch_ph = tp
 
-    def _torch_ph_arrays(self, structs, off, S_tot, reps, T_max):
+    def _torch_ph_arrays(self, structs, off, S_tot, reps, T_max, Q_max=0):
         B, n = len(structs), self.M
         m = max(len(_tph_static(st)['e']) for st in structs)
         N = B * reps
@@ -318,6 +401,9 @@ class BatchPlan:
         T = T_max
         tg = np.zeros((N, max(T, 1)), np.int64); tmask = np.zeros_like(tg)
         te = np.zeros((N, max(T, 1), 3), np.int64); tv = np.zeros_like(te)
+        Q = Q_max
+        qg = np.zeros((N, max(Q, 1)), np.int64); qmask = np.zeros_like(qg)
+        qf = np.zeros((N, max(Q, 1), 4), np.int64); qv = np.zeros_like(qf)
         item = np.arange(N, dtype=np.int64)
         for r in range(reps):
             for b, st in enumerate(structs):
@@ -332,13 +418,20 @@ class BatchPlan:
                 if mt and T:
                     tg[k, :mt] = d['t'] + o; tmask[k, :mt] = 1
                     te[k, :mt] = d['tedges']; tv[k, :mt] = d['tverts']
-        self._tph_meta = dict(N=N, n=n, m=m, T=T)
+                mq = len(d['q'])
+                if mq and Q:
+                    qg[k, :mq] = d['q'] + o; qmask[k, :mq] = 1
+                    qf[k, :mq] = d['qfaces']; qv[k, :mq] = d['qverts']
+        K1 = max((_tph_static(st)['cyc'] for st in structs), default=0)
+        self._tph_meta = dict(N=N, n=n, m=m, T=T, Q=Q, K1=K1, K2=T)
         out = dict(vg=vg, vmask=vmask, eg=eg[:, :m] if m else eg[:, :0],
                    emask=emask[:, :m] if m else emask[:, :0],
                    ea=ea[:, :m] if m else ea[:, :0], eb=eb[:, :m] if m else eb[:, :0],
                    item=item)
         if T:
             out.update(tg=tg, tmask=tmask, te=te, tv=tv)
+        if Q:
+            out.update(qg=qg, qmask=qmask, qf=qf, qv=qv)
         return out
 
 
