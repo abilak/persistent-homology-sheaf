@@ -57,6 +57,7 @@ class BaseModel(nn.Module):
                 norm_stats = getattr(config.architecture, 'topo_norm_stats', False)
                 essential = getattr(config.architecture, 'topo_essential', False)
                 filt_squash = getattr(config.architecture, 'topo_filt_squash', False)
+                num_filt = getattr(config.architecture, 'topo_num_filtrations', 1)
                 self.topo_layers.append(
                     TopologyLayer(eqv_features=next_layer_features,
                                   hidden_dim=topo_hidden,
@@ -70,7 +71,8 @@ class BaseModel(nn.Module):
                                   gate_init=gate_init,
                                   norm_stats=norm_stats,
                                   essential=essential,
-                                  filt_squash=filt_squash)
+                                  filt_squash=filt_squash,
+                                  num_filtrations=num_filt)
                 )
             last_layer_features = next_layer_features
 

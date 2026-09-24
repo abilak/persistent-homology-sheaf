@@ -313,6 +313,7 @@ IMPROVE_VARIANTS = [
                        topo_filt_squash=True)),
     ("full", dict(FULL)),
     ("full_last", dict(FULL, topo_apply_layers="last")),
+    ("full_m4", dict(FULL, topo_num_filtrations=4)),        # 4 filtration heads
 ]
 
 

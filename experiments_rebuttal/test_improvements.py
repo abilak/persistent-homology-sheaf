@@ -11,6 +11,13 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np, torch, networkx as nx
+# float64: persistence pairing (and tie-merging, which rounds to 1e-6) is
+# discontinuous at ties. With several filtration heads, randomly initialized
+# ReLU MLPs produce exact / near ties, and float32 summation-order noise
+# (~1e-7) between batched / permuted computations can flip a pairing. That is
+# the measure-zero discontinuity of PH, not an implementation difference; in
+# float64 both paths agree to ~1e-15.
+torch.set_default_dtype(torch.float64)
 from easydict import EasyDict
 import layers.topology as T
 from models.base_model import BaseModel
@@ -33,7 +40,9 @@ def batch_vs_single(**kw):
     for b in range(6):
         xs = x[b:b+1].clone().requires_grad_(True); o = L(xs, [structs[b]])
         o.sum().backward(); outs.append(o); grads.append(xs.grad)
-    return (ob - torch.cat(outs)).abs().max().item(), (xb.grad - torch.cat(grads)).abs().max().item()
+    os_, gs = torch.cat(outs), torch.cat(grads)
+    return (((ob - os_).abs().max() / os_.abs().max().clamp_min(1)).item(),
+            ((xb.grad - gs).abs().max() / gs.abs().max().clamp_min(1)).item())
 
 
 def equivariance(**kw):
@@ -57,7 +66,7 @@ def model_invariance():
     arch = dict(block_features=[16, 16], depth_of_mlp=2, new_suffix=True, use_topology=True,
                 topo_hidden_dim=16, topo_max_ph_dim=1, topo_num_stats=8, topo_max_simplex_dim=2,
                 topo_multiplicity=True, topo_norm_stats=True, topo_essential=True,
-                topo_filt_squash=True, topo_readout=True)
+                topo_filt_squash=True, topo_readout=True, topo_num_filtrations=2)
     cfg = EasyDict(dict(architecture=arch, node_labels=3, num_classes=2))
     torch.manual_seed(0); m = BaseModel(cfg).eval()
     for fc in m.topo_fc:                      # make the zero-init head nonzero
@@ -115,9 +124,31 @@ def squash_pairing():
     return pairs(f) == pairs(torch.tanh(f))
 
 
+def heads_contain_single():
+    """m heads with the extra heads' fusion/gate weights zeroed must equal the
+    single-head layer carrying head 0's parameters (containment)."""
+    x, structs, _ = make_batch(4, 10, 6, seed=4)
+    torch.manual_seed(2)
+    L1 = T.TopologyLayer(6, 16, 1, 8, multiplicity=True, essential=True, node_level=False)
+    Lm = T.TopologyLayer(6, 16, 1, 8, multiplicity=True, essential=True, node_level=False,
+                         num_filtrations=3)
+    sd1 = L1.state_dict(); sdm = Lm.state_dict()
+    F1 = L1.ph.out_features
+    for k in sdm:
+        if k in sd1 and sd1[k].shape == sdm[k].shape:
+            sdm[k] = sd1[k].clone()
+    for key in ('fusion.0.weight', 'gate_conv.weight'):
+        W = torch.zeros_like(sdm[key]); W[:, :6 + F1] = sd1[key][:, :6 + F1]
+        sdm[key] = W
+    Lm.load_state_dict(sdm); L1.eval(); Lm.eval()
+    with torch.no_grad():
+        return (L1(x, structs) - Lm(x, structs)).abs().max().item()
+
+
 if __name__ == '__main__':
     ok = True
     for kw in [dict(ALL), dict(ALL, node_level=False), dict(essential=True),
+               dict(ALL, num_filtrations=3), dict(ALL, num_filtrations=2, node_level=False),
                dict(essential=True, multiplicity=True, scale_stats=True)]:
         df, dg = batch_vs_single(**dict(kw)); e = equivariance(**dict(kw))
         good = df < 1e-5 and dg < 1e-5 and e < 1e-4; ok &= good
@@ -130,4 +161,7 @@ if __name__ == '__main__':
     print(f"essential multiplicities (b0,b1): {ec} [{'OK' if good else 'FAIL'}]")
     sp = squash_pairing(); ok &= sp
     print(f"tanh squash preserves pairing: {sp} [{'OK' if sp else 'FAIL'}]")
+    hc = heads_contain_single(); ok &= hc < 1e-5
+    print(f"3 heads with extra heads zeroed == 1 head: {hc:.1e} [{'OK' if hc < 1e-5 else 'FAIL'}]")
     print("\nPASS" if ok else "\nFAIL"); sys.exit(0 if ok else 1)
+

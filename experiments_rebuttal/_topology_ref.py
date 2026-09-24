@@ -73,8 +73,7 @@ def ordered_pairs(sigma):
 class GraphStruct:
     """Cached, graph-only structure for the topology branch (device-agnostic
     index tensors are materialized lazily per device)."""
-    __slots__ = ("simplices_list", "simplex_to_idx", "S", "M", "dim_batches",
-                 "simplex_dim",
+    __slots__ = ("simplices_list", "simplex_to_idx", "S", "M",
                  "f_flat_cpu", "f_seg_cpu", "f_counts_cpu",
                  "face_tables_cpu", "_dev_cache")
 
@@ -128,15 +127,6 @@ class GraphStruct:
                                 torch.tensor(face_rows, dtype=torch.long))
         self.face_tables_cpu = face_tables
         self._dev_cache = {}
-        # for gudhi.SimplexTree.insert_batch: per dimension, a (k+1, n_k)
-        # vertex array and the positions of those simplices in simplices_list
-        self.simplex_dim = [len(sg) - 1 for sg in simplices_list]
-        self.dim_batches = []
-        for dim in sorted(by_dim):
-            idx = np.asarray(by_dim[dim], dtype=np.int64)
-            verts = np.asarray([simplices_list[i] for i in idx],
-                               dtype=np.int32).T.copy()
-            self.dim_batches.append((idx, verts))
 
     def on(self, device):
         """Return (f_flat, f_seg, f_counts, face_tables{dim:(sim,face)})."""
@@ -338,211 +328,227 @@ class DifferentiablePH(nn.Module):
             adjusted = adjusted.scatter(0, sim_idx_t, new_val)
         return adjusted
 
-    # ------------------------------------------------------------------ #
-    #  Vectorized forward.
-    #  Host side: gudhi + integer bookkeeping only (which simplices pair with
-    #  which, and which nodes each pair involves). Device side: ONE gather of
-    #  birth/death values for the whole batch, ONE embedding/attention MLP call
-    #  per homological dimension, and segment softmax / segment sums via
-    #  scatter ops. Replaces ~100 tiny tensor ops per graph (and their autograd
-    #  nodes). Numerically identical to the per-graph reference
-    #  (test_fast_vs_ref.py, float64).
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _seg_softmax(logits, seg, n_seg):
-        """softmax of logits (N,) within segments seg (N,) -> weights (N,)."""
-        mx = torch.full((n_seg,), float('-inf'), device=logits.device,
-                        dtype=logits.dtype)
-        mx = mx.scatter_reduce(0, seg, logits, reduce='amax', include_self=True)
-        e = torch.exp(logits - mx[seg])
-        den = torch.zeros(n_seg, device=logits.device, dtype=logits.dtype)
-        den = den.index_add(0, seg, e)
-        return e / den[seg]
-
-    def _pool(self, q, seg, n_seg, embeds, attns, dims, P1,
-              node_rows=None, node_cols=None, M=None):
-        """Attention pooling of pair inputs q (N, c) grouped by seg (graph*P1+dim).
-        Returns graph part (n_seg, v) and, if node_rows given, node part
-        (n_seg*M, v) plus per-(seg,node) counts."""
-        v = self.vec_dim
-        dev, dt = q.device, q.dtype
-        emb = torch.zeros(q.shape[0], v, device=dev, dtype=dt)
-        logit = torch.zeros(q.shape[0], device=dev, dtype=dt)
-        for d in range(P1):
-            m = dims == d
-            if bool(m.any()):
-                emb = emb.index_put((m.nonzero(as_tuple=True)[0],), embeds[d](q[m]))
-                logit = logit.index_put((m.nonzero(as_tuple=True)[0],),
-                                        attns[d](q[m]).squeeze(-1))
-        w = self._seg_softmax(logit, seg, n_seg)
-        gpool = torch.zeros(n_seg, v, device=dev, dtype=dt).index_add(
-            0, seg, w.unsqueeze(-1) * emb)
-        if node_rows is None:
-            return gpool, None, None
-        gid = seg[node_rows] * M + node_cols
-        n_g = n_seg * M
-        wn = self._seg_softmax(logit[node_rows], gid, n_g)
-        npool = torch.zeros(n_g, v, device=dev, dtype=dt).index_add(
-            0, gid, wn.unsqueeze(-1) * emb[node_rows])
-        ncount = torch.zeros(n_g, device=dev, dtype=dt).index_add(
-            0, gid, torch.ones_like(wn))
-        return gpool, npool, ncount
+    def _pool_essential(self, d, entries, M, device):
+        """Attention pooling over essential births of dimension d, plus
+        log(1 + #essential). Returns graph part (vec_dim+1,) and node part
+        (vec_dim+1, M) or None. Empty diagram -> zeros (log 1 = 0)."""
+        if len(entries) == 0:
+            gp = torch.zeros(self.ess_width, device=device)
+            np_ = torch.zeros(self.ess_width, M, device=device) if M is not None else None
+            return gp, np_
+        births = torch.stack([e[0] for e in entries])          # (E, 1)
+        emb = self.ess_embeds[d](births)                       # (E, v)
+        logit = self.ess_attns[d](births)                      # (E, 1)
+        w = torch.softmax(logit, dim=0)
+        mult = torch.log1p(torch.tensor(float(len(entries)), device=device))
+        gp = torch.cat([(w * emb).sum(dim=0), mult.reshape(1)])
+        np_ = None
+        if M is not None:
+            inv = np.zeros((len(entries), M), dtype=np.float32)
+            for k, (_, ns) in enumerate(entries):
+                for n in ns:
+                    if n < M:
+                        inv[k, n] = 1.0
+            inv = torch.from_numpy(inv).to(device)
+            masked = logit.expand(-1, M).masked_fill(inv == 0, float('-inf'))
+            nw = torch.softmax(masked, dim=0).nan_to_num(0.0)
+            np_ = torch.cat([torch.mm(emb.t(), nw),
+                             torch.log1p(inv.sum(dim=0)).reshape(1, M)], dim=0)
+        return gp, np_
 
     def forward(self, filt_batch, device, num_nodes=None):
+        """
+        Args:
+            filt_batch: list of B (GraphStruct, filtration_values[S])
+            device, num_nodes: as before.
+        Returns:
+            graph_vec B x out_features, node_vec B x out_features x M (or None)
+        """
         B = len(filt_batch)
-        P1 = self.max_ph_dim + 1
-        M = num_nodes
-        node_level = M is not None
         if not GUDHI_AVAILABLE:
             gv = torch.zeros(B, self.out_features, device=device)
-            nv = torch.zeros(B, self.node_out_features, M,
-                             device=device) if node_level else None
+            nv = torch.zeros(B, self.node_out_features, num_nodes,
+                             device=device) if num_nodes else None
             return gv, nv
 
-        # Phase 1 (device): batched non-decreasing correction, one host copy.
-        offsets, cat_parts, off = [], [], 0
-        for st, ft in filt_batch:
-            offsets.append(None if st.S == 0 else off)
-            if st.S:
-                cat_parts.append(ft); off += st.S
-        if not cat_parts:
-            gv = torch.zeros(B, self.out_features, device=device)
-            nv = torch.zeros(B, self.node_out_features, M,
-                             device=device) if node_level else None
-            return gv, nv
-        vals_cat = torch.cat(cat_parts)
-        dim_sim, dim_face = defaultdict(list), defaultdict(list)
-        for (st, _), o in zip(filt_batch, offsets):
-            if o is None:
+        # Phase 1 (GPU, no host sync): non-decreasing-correct the filtration for
+        # the WHOLE batch at once. Filtration vectors are concatenated and the
+        # per-graph face tables are merged per dimension with index offsets, so
+        # the correction costs a few kernels for the batch rather than ~3 per
+        # graph. Faces of a simplex always live in the same graph, so offsetting
+        # keeps the computation identical to doing it graph by graph.
+        offsets, cat_parts = [], []
+        off = 0
+        for st, filt_tensor in filt_batch:
+            if st.S == 0:
+                offsets.append(None)
                 continue
-            for dmn, (sim_t, face_t) in st.on(device)[3].items():
-                dim_sim[dmn].append(sim_t + o); dim_face[dmn].append(face_t + o)
-        tables = [(torch.cat(dim_sim[dd]), torch.cat(dim_face[dd]))
-                  for dd in sorted(dim_sim)]
-        adj = self._make_non_decreasing(vals_cat, tables)
-        host = adj.detach().cpu().numpy().astype(np.float64)
-        host_list = host.tolist()
+            offsets.append(off)
+            cat_parts.append(filt_tensor)
+            off += st.S
 
-        # Phase 2 (host): persistence + integer bookkeeping.
-        f_seg, f_b, f_d = [], [], []          # finite pairs
-        e_seg, e_b = [], []                   # essential classes
-        fn_r, fn_c, en_r, en_c = [], [], [], []   # node involvement (row, node)
-        for bi, ((st, _), o) in enumerate(zip(filt_batch, offsets)):
-            if o is None:
+        adj_list = [None] * len(filt_batch)
+        if cat_parts:
+            vals_cat = torch.cat(cat_parts)
+            dim_sim, dim_face = defaultdict(list), defaultdict(list)
+            for (st, _), o in zip(filt_batch, offsets):
+                if o is None:
+                    continue
+                _, _, _, ftabs = st.on(device)
+                for dmn, (sim_t, face_t) in ftabs.items():
+                    dim_sim[dmn].append(sim_t + o)
+                    dim_face[dmn].append(face_t + o)
+            batched_tables = [(torch.cat(dim_sim[dd]), torch.cat(dim_face[dd]))
+                              for dd in sorted(dim_sim)]
+            adjusted_cat = self._make_non_decreasing(vals_cat, batched_tables)
+            # ONE host transfer for the whole batch (no per-graph sync)
+            flat_vals = adjusted_cat.detach().cpu().tolist()
+            for bi, ((st, _), o) in enumerate(zip(filt_batch, offsets)):
+                if o is not None:
+                    adj_list[bi] = adjusted_cat[o:o + st.S]
+        cursor = 0
+
+        vectors, node_vectors = [], []
+        for (st, filt_tensor), filt_adjusted in zip(filt_batch, adj_list):
+            simplices_list = st.simplices_list
+            simplex_to_idx = st.simplex_to_idx
+
+            if st.S == 0:
+                vectors.append(torch.zeros(self.out_features, device=device))
+                if num_nodes is not None:
+                    node_vectors.append(torch.zeros(self.node_out_features,
+                                                    num_nodes, device=device))
                 continue
-            vals = host[o:o + st.S]
-            tree = gudhi.SimplexTree()
-            for idx, verts in st.dim_batches:
-                tree.insert_batch(verts, vals[idx])
-            tree.make_filtration_non_decreasing()
-            tree.persistence(persistence_dim_max=self.essential)
-            pairs = tree.persistence_pairs()
+
+            filt_vals_list = flat_vals[cursor:cursor + st.S]
+            cursor += st.S
+
+            st_tree = gudhi.SimplexTree()
+            for i, sigma in enumerate(simplices_list):
+                st_tree.insert(list(sigma), filtration=filt_vals_list[i])
+            st_tree.make_filtration_non_decreasing()
+            # gudhi skips the complex's top dimension by default. A triangle-
+            # free graph (most molecules) has a 1-dim clique complex, so its H1
+            # -- every ring -- would never be computed. Finite pairs cannot
+            # occur in the top dimension, so this only adds essential classes;
+            # the default (off) path is left bit-identical to the paper model.
+            st_tree.persistence(persistence_dim_max=self.essential)
+            pairs = st_tree.persistence_pairs()
+
+            # node-involvement lookup only needed for node-level features
+            node_level = num_nodes is not None
             if node_level:
-                vlist = host_list[o:o + st.S]
                 val_to_nodes = defaultdict(set)
-                for idx, sigma in enumerate(st.simplices_list):
-                    val_to_nodes[(len(sigma), round(vlist[idx], 6))].update(sigma)
-            s2i = st.simplex_to_idx
-            for bs, ds in pairs:
-                dim = len(bs) - 1
-                if dim > self.max_ph_dim:
-                    continue
-                bk = tuple(sorted(bs))
-                if bk not in s2i:
-                    continue
-                b_idx = s2i[bk]
-                seg = bi * P1 + dim
-                if len(ds) == 0:
+                for idx, sigma in enumerate(simplices_list):
+                    key = (len(sigma), round(filt_vals_list[idx], 6))
+                    for v in sigma:
+                        val_to_nodes[key].add(v)
+
+            dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
+            ess_data = {d: [] for d in range(self.max_ph_dim + 1)}
+            for birth_simplex, death_simplex in pairs:
+                if len(death_simplex) == 0:
                     if not self.essential:
                         continue
+                    dim = len(birth_simplex) - 1
+                    birth_key = tuple(sorted(birth_simplex))
+                    if dim > self.max_ph_dim or birth_key not in simplex_to_idx:
+                        continue
+                    b_idx = simplex_to_idx[birth_key]
+                    involved = None
                     if node_level:
-                        for n in val_to_nodes[(len(bs), round(vlist[b_idx], 6))]:
+                        bv_r = round(filt_vals_list[b_idx], 6)
+                        # tie-merged birth-simplex vertex set (equivariant)
+                        involved = val_to_nodes[(len(birth_simplex), bv_r)]
+                    ess_data[dim].append(
+                        (filt_adjusted[b_idx].reshape(1), involved))
+                    continue
+                dim = len(birth_simplex) - 1
+                if dim > self.max_ph_dim:
+                    continue
+                birth_key = tuple(sorted(birth_simplex))
+                death_key = tuple(sorted(death_simplex))
+                if birth_key in simplex_to_idx and death_key in simplex_to_idx:
+                    birth_val = filt_adjusted[simplex_to_idx[birth_key]]
+                    death_val = filt_adjusted[simplex_to_idx[death_key]]
+                    persistence = torch.clamp(death_val - birth_val, min=0)
+                    bp = torch.stack([birth_val, persistence])
+                    involved = None
+                    if node_level:
+                        bv_r = round(filt_vals_list[simplex_to_idx[birth_key]], 6)
+                        dv_r = round(filt_vals_list[simplex_to_idx[death_key]], 6)
+                        involved = (val_to_nodes[(len(birth_simplex), bv_r)]
+                                    | val_to_nodes[(len(death_simplex), dv_r)])
+                    dim_data[dim].append((bp, involved))
+
+            graph_parts, node_parts = [], []
+            M = num_nodes
+            for d in range(self.max_ph_dim + 1):
+                entries = dim_data[d]
+                if len(entries) == 0:
+                    graph_parts.append(torch.zeros(
+                        self.per_dim_graph - self.ess_width, device=device))
+                    if M is not None:
+                        node_parts.append(torch.zeros(
+                            self.per_dim_node - self.ess_width, M, device=device))
+                    if self.essential:
+                        gp, np_ = self._pool_essential(d, ess_data[d], M, device)
+                        graph_parts[-1] = torch.cat([graph_parts[-1], gp])
+                        if M is not None:
+                            node_parts[-1] = torch.cat([node_parts[-1], np_], dim=0)
+                    continue
+                bp_raw = torch.stack([e[0] for e in entries])
+                bp = ((bp_raw - bp_raw.mean(dim=0))
+                      / (bp_raw.std(dim=0, correction=0) + 1e-8))
+                embeds = self.embeds[d](bp)
+                logits = self.attns[d](bp)
+                weights = torch.softmax(logits, dim=0)
+                gpart = (weights * embeds).sum(dim=0)
+                if self.multiplicity:
+                    mult = torch.log1p(torch.tensor(
+                        float(len(entries)), device=device))
+                    gpart = torch.cat([gpart, mult.reshape(1)])
+                if self.scale_stats:
+                    # absolute scale removed by the standardization above,
+                    # reinstated as invariant statistics of the raw diagram
+                    stats = torch.cat([bp_raw.mean(dim=0),
+                                       bp_raw.std(dim=0, correction=0)])  # (4,)
+                    gpart = torch.cat([gpart, stats])
+                graph_parts.append(gpart)
+                if M is not None:
+                    N = len(entries)
+                    # Build the node-involvement mask on the HOST (numpy) and
+                    # transfer once, instead of writing element-by-element into
+                    # a GPU tensor (each such write is a tiny device sync).
+                    involve_np = np.zeros((N, M), dtype=np.float32)
+                    for k, (_, ns) in enumerate(entries):
+                        for n in ns:
                             if n < M:
-                                en_r.append(len(e_b)); en_c.append(n)
-                    e_seg.append(seg); e_b.append(o + b_idx)
-                    continue
-                dk = tuple(sorted(ds))
-                if dk not in s2i:
-                    continue
-                d_idx = s2i[dk]
-                if node_level:
-                    inv = (val_to_nodes[(len(bs), round(vlist[b_idx], 6))]
-                           | val_to_nodes[(len(ds), round(vlist[d_idx], 6))])
-                    for n in inv:
-                        if n < M:
-                            fn_r.append(len(f_b)); fn_c.append(n)
-                f_seg.append(seg); f_b.append(o + b_idx); f_d.append(o + d_idx)
+                                involve_np[k, n] = 1.0
+                    involve = torch.from_numpy(involve_np).to(device)
+                    logits_exp = logits.expand(-1, M)
+                    masked = logits_exp.masked_fill(involve == 0, float('-inf'))
+                    node_w = torch.softmax(masked, dim=0).nan_to_num(0.0)
+                    npart = torch.mm(embeds.t(), node_w)          # (vec_dim, M)
+                    if self.multiplicity:
+                        # per-node feature count = #pairs involving each node
+                        node_mult = torch.log1p(involve.sum(dim=0))  # (M,)
+                        npart = torch.cat([npart, node_mult.reshape(1, M)], dim=0)
+                    node_parts.append(npart)
+                if self.essential:
+                    gp, np_ = self._pool_essential(d, ess_data[d], M, device)
+                    graph_parts[-1] = torch.cat([graph_parts[-1], gp])
+                    if M is not None:
+                        node_parts[-1] = torch.cat([node_parts[-1], np_], dim=0)
 
-        # Phase 3 (device): vectorized vectorization.
-        n_seg = B * P1
-        dt = adj.dtype
-        # all index lists -> ONE host-to-device copy, split on device
-        _lists = [f_seg, f_b, f_d, e_seg, e_b, fn_r, fn_c, en_r, en_c]
-        _lens = [len(a) for a in _lists]
-        _packed = torch.as_tensor(
-            np.fromiter((x for a in _lists for x in a), dtype=np.int64,
-                        count=sum(_lens)), device=device)
-        _split = dict(zip(map(id, _lists), torch.split(_packed, _lens)))
-        LT = lambda a: _split[id(a)]
-        v = self.vec_dim
-        g_blocks, n_blocks = [], []
+            vectors.append(torch.cat(graph_parts))
+            if M is not None:
+                node_vectors.append(torch.cat(node_parts, dim=0))
 
-        # finite pairs -> [pooled(v), mult?, stats(4)?]
-        seg_t = LT(f_seg)
-        if len(f_b):
-            bv = adj[LT(f_b)]; dv = adj[LT(f_d)]
-            bp_raw = torch.stack([bv, torch.clamp(dv - bv, min=0)], dim=1)
-        else:
-            bp_raw = torch.zeros(0, 2, device=device, dtype=dt)
-        cnt = torch.zeros(n_seg, device=device, dtype=dt).index_add(
-            0, seg_t, torch.ones(len(f_b), device=device, dtype=dt))
-        cden = cnt.clamp_min(1).unsqueeze(-1)
-        mean = torch.zeros(n_seg, 2, device=device, dtype=dt).index_add(
-            0, seg_t, bp_raw) / cden
-        cen = bp_raw - mean[seg_t]
-        var = torch.zeros(n_seg, 2, device=device, dtype=dt).index_add(
-            0, seg_t, cen * cen) / cden
-        # sqrt has an infinite derivative at 0 (empty / single-pair / constant
-        # segments); evaluate it only where var > 0 so no NaN enters backward.
-        pos = var > 0
-        std = torch.where(pos, torch.sqrt(torch.where(pos, var, torch.ones_like(var))),
-                          torch.zeros_like(var))
-        q = cen / (std[seg_t] + 1e-8)
-        gpool, npool, ncnt = self._pool(
-            q, seg_t, n_seg, self.embeds, self.attns, seg_t % P1, P1,
-            LT(fn_r) if node_level else None, LT(fn_c) if node_level else None, M)
-        g_blocks.append(gpool)
-        if self.multiplicity:
-            g_blocks.append(torch.log1p(cnt).unsqueeze(-1))
-        if self.scale_stats:
-            g_blocks += [mean, std]
-        if node_level:
-            n_blocks.append(npool)
-            if self.multiplicity:
-                n_blocks.append(torch.log1p(ncnt).unsqueeze(-1))
-
-        # essential classes -> [pooled(v), mult]
-        if self.essential:
-            eseg = LT(e_seg)
-            eq = (adj[LT(e_b)] if len(e_b) else
-                  torch.zeros(0, device=device, dtype=dt)).unsqueeze(-1)
-            ecnt = torch.zeros(n_seg, device=device, dtype=dt).index_add(
-                0, eseg, torch.ones(len(e_b), device=device, dtype=dt))
-            egp, enp, encnt = self._pool(
-                eq, eseg, n_seg, self.ess_embeds, self.ess_attns, eseg % P1, P1,
-                LT(en_r) if node_level else None, LT(en_c) if node_level else None, M)
-            g_blocks += [egp, torch.log1p(ecnt).unsqueeze(-1)]
-            if node_level:
-                n_blocks += [enp, torch.log1p(encnt).unsqueeze(-1)]
-
-        graph_out = torch.cat(g_blocks, dim=1).reshape(B, P1 * self.per_dim_graph)
-        node_out = None
-        if node_level:
-            node_out = (torch.cat(n_blocks, dim=1)            # (n_seg*M, C)
-                        .reshape(B, P1, M, self.per_dim_node)
-                        .permute(0, 1, 3, 2)
-                        .reshape(B, P1 * self.per_dim_node, M))
+        graph_out = torch.stack(vectors)
+        node_out = torch.stack(node_vectors) if node_vectors else None
         return graph_out, node_out
+
 
 
 class InvertibleLayerNorm(nn.Module):
@@ -573,30 +579,20 @@ class TopologyLayer(nn.Module):
     def __init__(self, eqv_features, hidden_dim=64, max_ph_dim=1, num_stats=4,
                  gate_bias=2.0, node_level=True, multiplicity=False,
                  scale_stats=False, gate_mode='conv', gate_init=0.0,
-                 norm_stats=False, essential=False, filt_squash=False,
-                 num_filtrations=1):
+                 norm_stats=False, essential=False, filt_squash=False):
         super().__init__()
         self.node_level = node_level
         self.norm_stats = norm_stats
         self.gate_mode = gate_mode
         self.filtration = LearnedFiltration(eqv_features, hidden_dim,
                                             squash=filt_squash)
-        # num_filtrations > 1: independent learned filtration heads (as in
-        # TOGL), each an equivariant filtration generator; their diagrams are
-        # vectorized by the shared pooling and concatenated. All heads go
-        # through PH as ONE batch (B * m items). Zero weights on the extra
-        # heads' channels recover the single-filtration model exactly.
-        self.num_filtrations = num_filtrations
-        self.extra_filtrations = nn.ModuleList(
-            LearnedFiltration(eqv_features, hidden_dim, squash=filt_squash)
-            for _ in range(num_filtrations - 1))
         self.ph = DifferentiablePH(max_ph_dim, num_stats,
                                    multiplicity=multiplicity,
                                    scale_stats=scale_stats,
                                    essential=essential)
 
-        topo_dim = self.ph.out_features            # per-head graph-level width
-        node_dim = self.ph.node_out_features       # per-head node-level width
+        topo_dim = self.ph.out_features            # graph-level width
+        node_dim = self.ph.node_out_features       # node-level width
         # norm_stats: invertible normalization (LN output + its mean/log-std),
         # adds 2 channels per normalized vector
         norm_cls = InvertibleLayerNorm if norm_stats else nn.LayerNorm
@@ -605,10 +601,6 @@ class TopologyLayer(nn.Module):
             self.node_norm = norm_cls(node_dim)
         if norm_stats:
             topo_dim, node_dim = topo_dim + 2, node_dim + 2
-        # normalization is applied PER HEAD (shared affine), so the extra heads
-        # never enter the first head's statistics: zeroing their fusion weights
-        # recovers the single-filtration layer exactly.
-        topo_dim, node_dim = topo_dim * num_filtrations, node_dim * num_filtrations
 
         # fuse x || T_graph  (+ t_row || t_col when node-level features are on)
         fuse_in = eqv_features + topo_dim + (2 * node_dim if node_level else 0)
@@ -664,44 +656,25 @@ class TopologyLayer(nn.Module):
             self.last_graph_vec = None
             return x_eqv
         filt_batch = self.filtration(x_eqv, structs)
-        for head in self.extra_filtrations:          # head-major: (m * B) items
-            filt_batch = filt_batch + head(x_eqv, structs)
         graph_vec, node_vec = self.ph(
             filt_batch, device=x_eqv.device,
             num_nodes=M if self.node_level else None)
-        m = self.num_filtrations
-        # (m*B, F) head-major -> per-head normalization -> (B, m*F')
-        graph_vec = self.topo_norm(graph_vec).reshape(m, B, -1)
-        graph_vec = graph_vec.permute(1, 0, 2).reshape(B, -1)
-        self.last_graph_vec = graph_vec
-        if self.node_level:
-            nv = self.node_norm(node_vec.permute(0, 2, 1))          # (m*B, M, Fn')
-            node_vec = (nv.reshape(m, B, M, -1).permute(1, 0, 3, 2)
-                        .reshape(B, -1, M))
 
-        # Factored fusion. The fused input [x_uv | g | t_u | t_v] is constant
-        # in (u, v) for g, in v for t_u and in u for t_v, so a 1x1 conv on it
-        # splits EXACTLY into a conv on x plus broadcast per-graph / per-node
-        # products: W[x;g;t_u;t_v] = W_x x_uv + W_g g + W_r t_u + W_c t_v.
-        # Same function and parameters as materializing the (B, C_in, M, M)
-        # concatenation, at C_x/C_in of the dense cost. The gate conv reads the
-        # same input, so both first layers share one factored product.
-        convs = [self.fusion[0]] + ([self.gate_conv] if self.gate_conv is not None else [])
-        W = torch.cat([c.weight[:, :, 0, 0] for c in convs], dim=0)   # (O, C_in)
-        bias = torch.cat([c.bias for c in convs], dim=0)
-        cx, cg = x_eqv.shape[1], graph_vec.shape[1]
-        pre = torch.nn.functional.conv2d(
-            x_eqv, W[:, :cx, None, None], bias)                        # (B, O, M, M)
-        pre = pre + (graph_vec @ W[:, cx:cx + cg].t())[:, :, None, None]
+        graph_vec = self.topo_norm(graph_vec)
+        self.last_graph_vec = graph_vec
+        graph_bc = graph_vec.unsqueeze(-1).unsqueeze(-1).expand(B, -1, M, M)
+
         if self.node_level:
-            cn = node_vec.shape[1]
-            Wr, Wc = W[:, cx + cg:cx + cg + cn], W[:, cx + cg + cn:]
-            pre = (pre + torch.einsum('bcm,oc->bom', node_vec, Wr)[:, :, :, None]
-                   + torch.einsum('bcm,oc->bom', node_vec, Wc)[:, :, None, :])
-        n_f = self.fusion[0].out_channels
-        delta = self.fusion[2](self.fusion[1](pre[:, :n_f]))
+            node_vec = self.node_norm(node_vec.permute(0, 2, 1)).permute(0, 2, 1)
+            node_row = node_vec.unsqueeze(-1).expand(B, -1, M, M)
+            node_col = node_vec.unsqueeze(-2).expand(B, -1, M, M)
+            combined = torch.cat([x_eqv, graph_bc, node_row, node_col], dim=1)
+        else:
+            combined = torch.cat([x_eqv, graph_bc], dim=1)
+
+        delta = self.fusion(combined)
         if self.gate_conv is not None:
-            gate = torch.sigmoid(pre[:, n_f:])
+            gate = torch.sigmoid(self.gate_conv(combined))
         else:
             gate = self.gate_scalar          # raw scalar: 0 => exactly baseline
         return x_eqv + gate * delta

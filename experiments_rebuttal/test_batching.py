@@ -53,8 +53,10 @@ def test_batch_vs_single(node_level, multiplicity, scale_stats=False, norm_stats
     out_s = torch.cat(outs, dim=0)
     grad_s = torch.cat(grads, dim=0)
 
-    df = (out_b - out_s).abs().max().item()
-    dg = (xb.grad - grad_s).abs().max().item()
+    # relative: the batched path sums across graphs in one scatter-add, so
+    # float32 agreement is up to summation order, not bitwise
+    df = ((out_b - out_s).abs().max() / out_s.abs().max().clamp_min(1)).item()
+    dg = ((xb.grad - grad_s).abs().max() / grad_s.abs().max().clamp_min(1)).item()
     return df, dg
 
 
