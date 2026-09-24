@@ -29,13 +29,13 @@ def make_batch(B, M, d, seed=0):
     return x, structs, adjs
 
 
-def test_batch_vs_single(node_level, multiplicity, scale_stats=False, B=6, M=12, d=8):
+def test_batch_vs_single(node_level, multiplicity, scale_stats=False, norm_stats=False, B=6, M=12, d=8):
     """Batched forward must equal per-graph forward, in values AND gradients."""
     x, structs, adjs = make_batch(B, M, d, seed=1)
     torch.manual_seed(7)
     L = T.TopologyLayer(d, 16, 1, 8, gate_bias=1.0,
                         node_level=node_level, multiplicity=multiplicity,
-                        scale_stats=scale_stats)
+                        scale_stats=scale_stats, norm_stats=norm_stats)
     L.eval()
 
     xb = x.clone().requires_grad_(True)
@@ -70,7 +70,7 @@ def test_order_invariance(B=6, M=12, d=8):
     return (o1[perm] - o2).abs().max().item()
 
 
-def test_equivariance(node_level, multiplicity, scale_stats=False, M=11, d=6, trials=3):
+def test_equivariance(node_level, multiplicity, scale_stats=False, norm_stats=False, M=11, d=6, trials=3):
     worst = 0.0
     for t in range(trials):
         A = rand_adj(M, 500 + t)
@@ -79,7 +79,7 @@ def test_equivariance(node_level, multiplicity, scale_stats=False, M=11, d=6, tr
         torch.manual_seed(11)
         L = T.TopologyLayer(d, 16, 1, 8, gate_bias=1.0,
                             node_level=node_level, multiplicity=multiplicity,
-                            scale_stats=scale_stats)
+                            scale_stats=scale_stats, norm_stats=norm_stats)
         L.eval()
         perm = torch.randperm(M)
         Ap = A[np.ix_(perm.numpy(), perm.numpy())]
@@ -97,10 +97,11 @@ if __name__ == '__main__':
     for nl in (True, False):
         for mult in (False, True):
             for sc in (False, True):
-                df, dg = test_batch_vs_single(nl, mult, sc)
+              for ns in (False, True):
+                df, dg = test_batch_vs_single(nl, mult, sc, ns)
                 good = df < 1e-5 and dg < 1e-5
                 ok &= good
-                print(f"  node_level={nl!s:<5} mult={mult!s:<5} scale={sc!s:<5} "
+                print(f"  node_level={nl!s:<5} mult={mult!s:<5} scale={sc!s:<5} norm_stats={ns!s:<5} "
                       f"fwd={df:.2e} grad={dg:.2e}  [{'OK' if good else 'FAIL'}]")
 
     d_order = test_order_invariance()
@@ -112,10 +113,11 @@ if __name__ == '__main__':
     for nl in (True, False):
         for mult in (False, True):
             for sc in (False, True):
-                e = test_equivariance(nl, mult, sc)
+              for ns in (False, True):
+                e = test_equivariance(nl, mult, sc, ns)
                 good = e < 1e-4
                 ok &= good
-                print(f"  node_level={nl!s:<5} mult={mult!s:<5} scale={sc!s:<5} "
+                print(f"  node_level={nl!s:<5} mult={mult!s:<5} scale={sc!s:<5} norm_stats={ns!s:<5} "
                       f"err={e:.2e}  [{'OK' if good else 'FAIL'}]")
 
     print("\nPASS" if ok else "\nFAIL")

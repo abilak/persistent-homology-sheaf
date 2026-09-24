@@ -54,6 +54,9 @@ class BaseModel(nn.Module):
                 scale_stats = getattr(config.architecture, 'topo_scale_stats', False)
                 gate_mode = getattr(config.architecture, 'topo_gate_mode', 'conv')
                 gate_init = getattr(config.architecture, 'topo_gate_init', 0.0)
+                norm_stats = getattr(config.architecture, 'topo_norm_stats', False)
+                essential = getattr(config.architecture, 'topo_essential', False)
+                filt_squash = getattr(config.architecture, 'topo_filt_squash', False)
                 self.topo_layers.append(
                     TopologyLayer(eqv_features=next_layer_features,
                                   hidden_dim=topo_hidden,
@@ -64,9 +67,28 @@ class BaseModel(nn.Module):
                                   multiplicity=multiplicity,
                                   scale_stats=scale_stats,
                                   gate_mode=gate_mode,
-                                  gate_init=gate_init)
+                                  gate_init=gate_init,
+                                  norm_stats=norm_stats,
+                                  essential=essential,
+                                  filt_squash=filt_squash)
                 )
             last_layer_features = next_layer_features
+
+        # Topological readout: a linear head on each topology layer's
+        # (normalized, invariant) graph-level vector, added to the class
+        # scores. Zero-initialized, so the network starts at the model without
+        # it; zero weights recover it exactly (all expressivity results kept).
+        self.topo_readout = self.use_topology and getattr(
+            config.architecture, 'topo_readout', False)
+        self.topo_fc = nn.ModuleList()
+        if self.topo_readout:
+            for tl in self.topo_layers:
+                if isinstance(tl, nn.Identity):
+                    self.topo_fc.append(nn.Identity())
+                    continue
+                head = nn.Linear(tl.graph_feat_dim, self.config.num_classes)
+                nn.init.zeros_(head.weight); nn.init.zeros_(head.bias)
+                self.topo_fc.append(head)
 
         # Second part
         self.fc_layers = nn.ModuleList()
@@ -92,6 +114,7 @@ class BaseModel(nn.Module):
     def forward(self, input):
         x = input
         scores = torch.tensor(0, device=input.device, dtype=x.dtype)
+        topo_scores = torch.tensor(0, device=input.device, dtype=x.dtype)
 
         # Build simplicial complexes once from input adjacency
         simplices_batch = None
@@ -106,6 +129,8 @@ class BaseModel(nn.Module):
             # Steps 2-5: topology (filtration on X^(l+1/2) -> PH -> broadcast -> fuse)
             if self.use_topology and not isinstance(self.topo_layers[i], nn.Identity):
                 x = self.topo_layers[i](x, simplices_batch)
+                if self.topo_readout and self.topo_layers[i].last_graph_vec is not None:
+                    topo_scores = self.topo_fc[i](self.topo_layers[i].last_graph_vec) + topo_scores
 
             if self.config.architecture.new_suffix:
                 # use new suffix
@@ -118,4 +143,4 @@ class BaseModel(nn.Module):
                 x = fc(x)
             scores = x
 
-        return scores
+        return scores + topo_scores

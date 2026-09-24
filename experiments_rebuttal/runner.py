@@ -273,6 +273,64 @@ PLANS = {
          ]]),
 }
 
+# Invertible-normalization fix (implementation contains the idealized fusion)
+# plus candidate improvements, on the small datasets, single fixed seed, same
+# folds as the paper. Baseline rerun on the same machine for a paired test.
+REV = {"topo_multiplicity": True}
+FIX_VARIANTS = [
+    ("rev", dict(REV)),                                             # paper model
+    ("rev_ns", dict(REV, topo_norm_stats=True)),                    # + invertible LN
+    ("rev_ns_sc", dict(REV, topo_norm_stats=True, topo_scale_stats=True)),
+    ("rev_ns_last", dict(REV, topo_norm_stats=True, topo_apply_layers="last")),
+]
+PLANS["fix_small"] = (
+    [dict(dataset=ds, model="baseline", seed=0, fold=f, epochs=None)
+     for ds in ["MUTAG", "PTC"] for f in range(1, 11)]
+    + [dict(dataset=ds, model="topo", seed=0, fold=f, epochs=None,
+            variant=vn, overrides=ov)
+       for ds in ["MUTAG", "PTC"] for vn, ov in FIX_VARIANTS
+       for f in range(1, 11)])
+PLANS["fix_big"] = (
+    [dict(dataset=ds, model="baseline", seed=0, fold=f, epochs=None)
+     for ds in ["NCI1", "NCI109"] for f in range(1, 11)]
+    + [dict(dataset=ds, model="topo", seed=0, fold=f, epochs=None,
+            variant=vn, overrides=ov)
+       for ds in ["NCI1", "NCI109"] for vn, ov in FIX_VARIANTS
+       for f in range(1, 11)])
+
+# Architecture improvements (all preserve invariance + every expressivity
+# result; see test_improvements.py). Ablation ladder, each rung adds one change.
+# FULL is fixed a priori as the final model -- do NOT pick the best rung per
+# dataset on these folds (under the Xu protocol that is test-set selection);
+# report FULL as the model and the ladder as an ablation.
+FULL = dict(REV, topo_norm_stats=True, topo_essential=True,
+            topo_filt_squash=True, topo_readout=True)
+IMPROVE_VARIANTS = [
+    ("rev", dict(REV)),
+    ("ns", dict(REV, topo_norm_stats=True)),
+    ("ns_ess", dict(REV, topo_norm_stats=True, topo_essential=True)),
+    ("ns_ess_sq", dict(REV, topo_norm_stats=True, topo_essential=True,
+                       topo_filt_squash=True)),
+    ("full", dict(FULL)),
+    ("full_last", dict(FULL, topo_apply_layers="last")),
+]
+
+
+def improve_plan(datasets, seeds=(0,)):
+    return ([dict(dataset=ds, model="baseline", seed=sd, fold=f, epochs=None)
+             for ds in datasets for sd in seeds for f in range(1, 11)]
+            + [dict(dataset=ds, model="topo", seed=sd, fold=f, epochs=None,
+                    variant=vn, overrides=ov)
+               for ds in datasets for sd in seeds for vn, ov in IMPROVE_VARIANTS
+               for f in range(1, 11)])
+
+
+PLANS["improve_small"] = improve_plan(["MUTAG", "PTC"])
+PLANS["improve_big"] = improve_plan(["NCI1", "NCI109"])
+PLANS["improve_other"] = improve_plan(["PROTEINS", "IMDBBINARY"])
+PLANS["improve_all"] = improve_plan(["MUTAG", "PTC", "NCI1", "NCI109",
+                                     "PROTEINS", "IMDBBINARY"])
+
 
 def result_path(job):
     ep = f"_e{job['epochs']}" if job.get('epochs') else ""

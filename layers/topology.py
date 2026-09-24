@@ -166,8 +166,13 @@ class LearnedFiltration(nn.Module):
     rho a shared MLP. Uses cached per-graph gather/scatter indices so the
     per-forward cost is a single gather + segment-sum + batched MLP.
     """
-    def __init__(self, in_features, hidden_dim=64):
+    def __init__(self, in_features, hidden_dim=64, squash=False):
         super().__init__()
+        # squash: f = tanh(rho(.)). tanh is strictly increasing, so it changes
+        # no persistence PAIRING (only the values), commutes with the max
+        # correction, and keeps filtration values in (-1, 1): prevents the
+        # filtration blow-up seen on PROTEINS (std 0.75 -> 22).
+        self.squash = squash
         self.mlp = nn.Sequential(
             nn.Linear(in_features, hidden_dim),
             nn.ReLU(),
@@ -225,6 +230,8 @@ class LearnedFiltration(nn.Module):
         sums = sums.index_add(0, seg_idx, pair_vals)
         means = sums / counts.unsqueeze(-1)
         vals = self.mlp(means).squeeze(-1)                         # (S_tot,)
+        if self.squash:
+            vals = torch.tanh(vals)
 
         cursor = 0
         for b, st in enumerate(structs):
@@ -251,6 +258,8 @@ class LearnedFiltration(nn.Module):
             sums = torch.zeros(st.S, d, device=device, dtype=pair_vals.dtype)
             sums = sums.index_add(0, f_seg, pair_vals)
             vals = self.mlp(sums / f_counts.unsqueeze(-1)).squeeze(-1)
+            if self.squash:
+                vals = torch.tanh(vals)
             out.append((st, vals))
         return out
 
@@ -262,10 +271,19 @@ class DifferentiablePH(nn.Module):
     gradient flow through the filtration values. Consumes cached GraphStructs.
     """
     def __init__(self, max_ph_dim=1, vec_dim=16, multiplicity=False,
-                 scale_stats=False):
+                 scale_stats=False, essential=False):
         super().__init__()
         self.max_ph_dim = max_ph_dim
         self.vec_dim = vec_dim
+        # essential: also vectorize ESSENTIAL classes (death = infinity), which
+        # the base model discards. Each dimension gets a second block: attention
+        # pooling over the essential births + log(1 + #essential). On clique
+        # complexes of molecules (almost no triangles) every ring is an
+        # essential H1 class, so without this the branch only sees H0.
+        # The block is a function of the (invariant) persistence diagram, and
+        # zero weights recover the base model, so invariance and every
+        # expressivity result are preserved.
+        self.essential = essential
         # multiplicity: append log(1 + #persistence-pairs) per dimension, so the
         # pooling is aware of feature COUNT (which the softmax average loses).
         self.multiplicity = multiplicity
@@ -276,7 +294,8 @@ class DifferentiablePH(nn.Module):
         # (mean/std of birth, mean/std of persistence) at the graph level.
         self.scale_stats = scale_stats
         extra = (1 if multiplicity else 0)
-        self.per_dim_node = vec_dim + extra
+        self.ess_width = (vec_dim + 1) if essential else 0
+        self.per_dim_node = vec_dim + extra + self.ess_width
         self.per_dim_graph = self.per_dim_node + (4 if scale_stats else 0)
         self.out_features = (max_ph_dim + 1) * self.per_dim_graph
         self.node_out_features = (max_ph_dim + 1) * self.per_dim_node
@@ -287,6 +306,15 @@ class DifferentiablePH(nn.Module):
                 nn.Linear(2, vec_dim), nn.ReLU(), nn.Linear(vec_dim, vec_dim)))
             self.attns.append(nn.Sequential(
                 nn.Linear(2, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)))
+        if essential:
+            # essential classes carry a single finite coordinate: the birth
+            self.ess_embeds = nn.ModuleList()
+            self.ess_attns = nn.ModuleList()
+            for _ in range(max_ph_dim + 1):
+                self.ess_embeds.append(nn.Sequential(
+                    nn.Linear(1, vec_dim), nn.ReLU(), nn.Linear(vec_dim, vec_dim)))
+                self.ess_attns.append(nn.Sequential(
+                    nn.Linear(1, vec_dim), nn.ReLU(), nn.Linear(vec_dim, 1)))
 
     @staticmethod
     def _make_non_decreasing(filt_tensor, face_tables):
@@ -299,6 +327,34 @@ class DifferentiablePH(nn.Module):
             new_val = torch.max(adjusted[sim_idx_t], max_face)
             adjusted = adjusted.scatter(0, sim_idx_t, new_val)
         return adjusted
+
+    def _pool_essential(self, d, entries, M, device):
+        """Attention pooling over essential births of dimension d, plus
+        log(1 + #essential). Returns graph part (vec_dim+1,) and node part
+        (vec_dim+1, M) or None. Empty diagram -> zeros (log 1 = 0)."""
+        if len(entries) == 0:
+            gp = torch.zeros(self.ess_width, device=device)
+            np_ = torch.zeros(self.ess_width, M, device=device) if M is not None else None
+            return gp, np_
+        births = torch.stack([e[0] for e in entries])          # (E, 1)
+        emb = self.ess_embeds[d](births)                       # (E, v)
+        logit = self.ess_attns[d](births)                      # (E, 1)
+        w = torch.softmax(logit, dim=0)
+        mult = torch.log1p(torch.tensor(float(len(entries)), device=device))
+        gp = torch.cat([(w * emb).sum(dim=0), mult.reshape(1)])
+        np_ = None
+        if M is not None:
+            inv = np.zeros((len(entries), M), dtype=np.float32)
+            for k, (_, ns) in enumerate(entries):
+                for n in ns:
+                    if n < M:
+                        inv[k, n] = 1.0
+            inv = torch.from_numpy(inv).to(device)
+            masked = logit.expand(-1, M).masked_fill(inv == 0, float('-inf'))
+            nw = torch.softmax(masked, dim=0).nan_to_num(0.0)
+            np_ = torch.cat([torch.mm(emb.t(), nw),
+                             torch.log1p(inv.sum(dim=0)).reshape(1, M)], dim=0)
+        return gp, np_
 
     def forward(self, filt_batch, device, num_nodes=None):
         """
@@ -371,7 +427,12 @@ class DifferentiablePH(nn.Module):
             for i, sigma in enumerate(simplices_list):
                 st_tree.insert(list(sigma), filtration=filt_vals_list[i])
             st_tree.make_filtration_non_decreasing()
-            st_tree.persistence()
+            # gudhi skips the complex's top dimension by default. A triangle-
+            # free graph (most molecules) has a 1-dim clique complex, so its H1
+            # -- every ring -- would never be computed. Finite pairs cannot
+            # occur in the top dimension, so this only adds essential classes;
+            # the default (off) path is left bit-identical to the paper model.
+            st_tree.persistence(persistence_dim_max=self.essential)
             pairs = st_tree.persistence_pairs()
 
             # node-involvement lookup only needed for node-level features
@@ -384,8 +445,23 @@ class DifferentiablePH(nn.Module):
                         val_to_nodes[key].add(v)
 
             dim_data = {d: [] for d in range(self.max_ph_dim + 1)}
+            ess_data = {d: [] for d in range(self.max_ph_dim + 1)}
             for birth_simplex, death_simplex in pairs:
                 if len(death_simplex) == 0:
+                    if not self.essential:
+                        continue
+                    dim = len(birth_simplex) - 1
+                    birth_key = tuple(sorted(birth_simplex))
+                    if dim > self.max_ph_dim or birth_key not in simplex_to_idx:
+                        continue
+                    b_idx = simplex_to_idx[birth_key]
+                    involved = None
+                    if node_level:
+                        bv_r = round(filt_vals_list[b_idx], 6)
+                        # tie-merged birth-simplex vertex set (equivariant)
+                        involved = val_to_nodes[(len(birth_simplex), bv_r)]
+                    ess_data[dim].append(
+                        (filt_adjusted[b_idx].reshape(1), involved))
                     continue
                 dim = len(birth_simplex) - 1
                 if dim > self.max_ph_dim:
@@ -410,11 +486,16 @@ class DifferentiablePH(nn.Module):
             for d in range(self.max_ph_dim + 1):
                 entries = dim_data[d]
                 if len(entries) == 0:
-                    graph_parts.append(
-                        torch.zeros(self.per_dim_graph, device=device))
+                    graph_parts.append(torch.zeros(
+                        self.per_dim_graph - self.ess_width, device=device))
                     if M is not None:
-                        node_parts.append(
-                            torch.zeros(self.per_dim_node, M, device=device))
+                        node_parts.append(torch.zeros(
+                            self.per_dim_node - self.ess_width, M, device=device))
+                    if self.essential:
+                        gp, np_ = self._pool_essential(d, ess_data[d], M, device)
+                        graph_parts[-1] = torch.cat([graph_parts[-1], gp])
+                        if M is not None:
+                            node_parts[-1] = torch.cat([node_parts[-1], np_], dim=0)
                     continue
                 bp_raw = torch.stack([e[0] for e in entries])
                 bp = ((bp_raw - bp_raw.mean(dim=0))
@@ -454,6 +535,11 @@ class DifferentiablePH(nn.Module):
                         node_mult = torch.log1p(involve.sum(dim=0))  # (M,)
                         npart = torch.cat([npart, node_mult.reshape(1, M)], dim=0)
                     node_parts.append(npart)
+                if self.essential:
+                    gp, np_ = self._pool_essential(d, ess_data[d], M, device)
+                    graph_parts[-1] = torch.cat([graph_parts[-1], gp])
+                    if M is not None:
+                        node_parts[-1] = torch.cat([node_parts[-1], np_], dim=0)
 
             vectors.append(torch.cat(graph_parts))
             if M is not None:
@@ -464,25 +550,57 @@ class DifferentiablePH(nn.Module):
         return graph_out, node_out
 
 
+
+class InvertibleLayerNorm(nn.Module):
+    """LayerNorm that also returns the statistics it divides out.
+
+    Output is [LN(x) || mu(x) || log s(x)] with s = sqrt(Var(x) + eps), so
+    x = mu * 1 + s * (LN(x) - beta) / gamma is recoverable exactly (gamma != 0).
+    Plain LayerNorm identifies x with a*x + b*1 (a > 0); appending (mu, log s)
+    makes the map injective, which is what lets the implemented fusion contain
+    the idealized fusion of Section 3 (fusion receives an invertible function of
+    the raw topological vector). Normalization is over the LAST dim.
+    """
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        self.ln = nn.LayerNorm(dim, eps=eps)
+        self.eps = eps
+
+    def forward(self, x):
+        mu = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, unbiased=False, keepdim=True)
+        log_s = 0.5 * torch.log(var + self.eps)
+        return torch.cat([self.ln(x), mu, log_s], dim=-1)
+
+
 class TopologyLayer(nn.Module):
     """Full topology branch for one layer: learned filtration -> differentiable
     PH -> broadcast (graph + node level) -> gated residual fusion."""
     def __init__(self, eqv_features, hidden_dim=64, max_ph_dim=1, num_stats=4,
                  gate_bias=2.0, node_level=True, multiplicity=False,
-                 scale_stats=False, gate_mode='conv', gate_init=0.0):
+                 scale_stats=False, gate_mode='conv', gate_init=0.0,
+                 norm_stats=False, essential=False, filt_squash=False):
         super().__init__()
         self.node_level = node_level
+        self.norm_stats = norm_stats
         self.gate_mode = gate_mode
-        self.filtration = LearnedFiltration(eqv_features, hidden_dim)
+        self.filtration = LearnedFiltration(eqv_features, hidden_dim,
+                                            squash=filt_squash)
         self.ph = DifferentiablePH(max_ph_dim, num_stats,
                                    multiplicity=multiplicity,
-                                   scale_stats=scale_stats)
+                                   scale_stats=scale_stats,
+                                   essential=essential)
 
         topo_dim = self.ph.out_features            # graph-level width
         node_dim = self.ph.node_out_features       # node-level width
-        self.topo_norm = nn.LayerNorm(topo_dim)
+        # norm_stats: invertible normalization (LN output + its mean/log-std),
+        # adds 2 channels per normalized vector
+        norm_cls = InvertibleLayerNorm if norm_stats else nn.LayerNorm
+        self.topo_norm = norm_cls(topo_dim)
         if node_level:
-            self.node_norm = nn.LayerNorm(node_dim)
+            self.node_norm = norm_cls(node_dim)
+        if norm_stats:
+            topo_dim, node_dim = topo_dim + 2, node_dim + 2
 
         # fuse x || T_graph  (+ t_row || t_col when node-level features are on)
         fuse_in = eqv_features + topo_dim + (2 * node_dim if node_level else 0)
@@ -527,10 +645,15 @@ class TopologyLayer(nn.Module):
         # first, then unfreezes so the gate can adapt topology on top of an
         # already-trained baseline.
         self.frozen = False
+        # normalized graph-level topological vector of the last forward pass,
+        # read by the model's optional topological readout head (invariant)
+        self.graph_feat_dim = topo_dim
+        self.last_graph_vec = None
 
     def forward(self, x_eqv, structs):
         B, d, M, _ = x_eqv.shape
         if self.frozen:                              # warm-start: skip topology
+            self.last_graph_vec = None
             return x_eqv
         filt_batch = self.filtration(x_eqv, structs)
         graph_vec, node_vec = self.ph(
@@ -538,6 +661,7 @@ class TopologyLayer(nn.Module):
             num_nodes=M if self.node_level else None)
 
         graph_vec = self.topo_norm(graph_vec)
+        self.last_graph_vec = graph_vec
         graph_bc = graph_vec.unsqueeze(-1).unsqueeze(-1).expand(B, -1, M, M)
 
         if self.node_level:
