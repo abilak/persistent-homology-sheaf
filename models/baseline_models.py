@@ -133,6 +133,10 @@ class BaselineModel(nn.Module):
         raise ValueError(self.kind)
 
     def forward(self, input):
+        if getattr(input, '_n_real', None) is not None:
+            raise NotImplementedError(
+                "padded_batching is implemented (with exact masking) for the "
+                "PPGN / PPGN+PH model only; run MLP/GCN/GIN/GSN without it")
         h, A_norm, A_bin = extract_nodes(input)
         if self.kind == 'gsn':
             h = torch.cat([h, gsn_node_features(A_bin)], dim=-1)  # + cycle counts

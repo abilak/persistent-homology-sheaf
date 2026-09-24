@@ -317,13 +317,17 @@ IMPROVE_VARIANTS = [
 ]
 
 
-def improve_plan(datasets, seeds=(0,)):
-    return ([dict(dataset=ds, model="baseline", seed=sd, fold=f, epochs=None)
-             for ds in datasets for sd in seeds for f in range(1, 11)]
-            + [dict(dataset=ds, model="topo", seed=sd, fold=f, epochs=None,
-                    variant=vn, overrides=ov)
-               for ds in datasets for sd in seeds for vn, ov in IMPROVE_VARIANTS
-               for f in range(1, 11)])
+def improve_plan(datasets, seeds=(0,), extra=None, tag=""):
+    """extra: overrides applied to EVERY model (baseline included), e.g. the
+    fast settings, so baseline and topology share batching and schedule."""
+    extra = extra or {}
+    base = [dict(dataset=ds, model="baseline", seed=sd, fold=f, epochs=None,
+                 **({"variant": tag.strip("_"), "overrides": dict(extra)} if extra else {}))
+            for ds in datasets for sd in seeds for f in range(1, 11)]
+    return base + [dict(dataset=ds, model="topo", seed=sd, fold=f, epochs=None,
+                        variant=vn + tag, overrides=dict(ov, **extra))
+                   for ds in datasets for sd in seeds for vn, ov in IMPROVE_VARIANTS
+                   for f in range(1, 11)]
 
 
 PLANS["improve_small"] = improve_plan(["MUTAG", "PTC"])
@@ -331,6 +335,14 @@ PLANS["improve_big"] = improve_plan(["NCI1", "NCI109"])
 PLANS["improve_other"] = improve_plan(["PROTEINS", "IMDBBINARY"])
 PLANS["improve_all"] = improve_plan(["MUTAG", "PTC", "NCI1", "NCI109",
                                      "PROTEINS", "IMDBBINARY"])
+# Fast settings for GPU runs: padded batching (exact masking; ~2-2.5x fewer
+# steps/epoch) for baseline AND topology. The PH backend defaults to the
+# GPU-resident implementation on CUDA ('auto'). Results use a different batch
+# composition than the same-size protocol, so compare fast-vs-fast only.
+FAST = {"padded_batching": True}
+PLANS["improve_all_fast"] = improve_plan(["MUTAG", "PTC", "NCI1", "NCI109",
+                                          "PROTEINS", "IMDBBINARY"], extra=FAST, tag="_fast")
+PLANS["improve_big_fast"] = improve_plan(["NCI1", "NCI109"], extra=FAST, tag="_fast")
 
 
 def result_path(job):

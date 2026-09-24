@@ -32,8 +32,12 @@ class Trainer(object):
                                              lr=self.config.hyperparams.learning_rate,
                                              momentum=self.config.hyperparams.momentum)
         elif self.config.hyperparams.optimizer == 'adam':
+            # fused Adam on CUDA: one kernel for all parameter tensors instead of
+            # ~10 per tensor (the topology branch has ~5x the baseline's
+            # parameter tensors). Same update rule.
+            fused = {'fused': True} if self.device.type == 'cuda' else {}
             self.optimizer = torch.optim.Adam(params=self.model_wrapper.model.parameters(),
-                                              lr=self.config.hyperparams.learning_rate)
+                                              lr=self.config.hyperparams.learning_rate, **fused)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=20, gamma=config.hyperparams.decay_rate)
 
     def train(self):
@@ -82,7 +86,7 @@ class Trainer(object):
         total_loss = 0.
         total_correct_labels_or_distances = 0.
 
-        # Iterate over batches
+        # Iterate over batches (metrics accumulate on device; one sync/epoch)
         for cur_it in tt:
             # One Train step on the current batch
             loss, correct_labels_or_distances = self.train_step()
@@ -92,6 +96,9 @@ class Trainer(object):
 
         tt.close()
         self.scheduler.step()
+        total_loss = float(total_loss)
+        if torch.is_tensor(total_correct_labels_or_distances):
+            total_correct_labels_or_distances = float(total_correct_labels_or_distances)
 
         loss_per_epoch = total_loss/self.data_loader.train_size
         if not self.is_QM9:
@@ -116,7 +123,7 @@ class Trainer(object):
         loss.backward()
         self.optimizer.step()
 
-        return loss.cpu().item(), correct_labels_or_distances
+        return loss.detach(), correct_labels_or_distances
 
     def validate(self, epoch):
         """
@@ -145,10 +152,13 @@ class Trainer(object):
                     self.model_wrapper.run_model_get_loss_and_results(graph, label)
 
                 # update metrics returned from train_step func
-                total_loss += loss.cpu().item()
+                total_loss += loss.detach()
                 total_correct_or_dist += correct_or_dist
 
         # tt.close()
+        total_loss = float(total_loss)
+        if torch.is_tensor(total_correct_or_dist):
+            total_correct_or_dist = float(total_correct_or_dist)
 
         val_loss = total_loss/self.data_loader.val_size
         if self.is_QM9:

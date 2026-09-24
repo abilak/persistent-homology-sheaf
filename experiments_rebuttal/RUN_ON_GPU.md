@@ -75,3 +75,36 @@ me and I'll fold the final numbers into the rebuttal.
 - `aggregate.py` prints the **paired** topo−baseline difference per dataset with a
   permutation p-value, Wilcoxon p-value, and 95% bootstrap CI — the statistic
   that answers "are the gains within fold std?".
+
+## Fast GPU training (impl-containment branch)
+
+The topology branch no longer needs the CPU on GPU runs:
+
+* `topo_ph_backend: "auto"` (default) computes persistent homology on the GPU
+  (`layers/torch_ph.py`) whenever the batch's clique complexes are <= 2-dim,
+  homology <= 1 (the TU configuration) and the batch has <= 16 triangles per
+  graph; other batches fall back to gudhi. No host synchronization in the
+  forward or backward pass. Exact vs gudhi (`test_torch_ph.py`).
+* `padded_batching: true` batches graphs of similar size with exact masking
+  (`test_padded.py`): 2-2.5x fewer steps per epoch. PPGN / PPGN+PH only.
+* Metrics accumulate on device (one sync per epoch); Adam is fused on CUDA.
+
+Check that a step really has no host syncs, and time it:
+
+```bash
+SYNC_DEBUG=1 python experiments_rebuttal/bench_backends.py NCI1 cuda torch 20   # raises on any sync
+python experiments_rebuttal/bench_backends.py NCI1 cuda baseline 50
+python experiments_rebuttal/bench_backends.py NCI1 cuda gudhi 50
+python experiments_rebuttal/bench_backends.py NCI1 cuda torch 50
+```
+
+Run the improvement sweep with the fast settings (baseline gets the same
+batching), then score against the matched baseline:
+
+```bash
+CCD_DEVICE=cuda python experiments_rebuttal/runner.py improve_all_fast 8 1
+python experiments_rebuttal/compare_variant.py NCI1 fast
+```
+
+Several jobs share one GPU well now that no job blocks on the CPU; raise the
+worker count until GPU utilization saturates.

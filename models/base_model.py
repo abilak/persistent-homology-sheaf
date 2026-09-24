@@ -58,6 +58,7 @@ class BaseModel(nn.Module):
                 essential = getattr(config.architecture, 'topo_essential', False)
                 filt_squash = getattr(config.architecture, 'topo_filt_squash', False)
                 num_filt = getattr(config.architecture, 'topo_num_filtrations', 1)
+                ph_backend = getattr(config.architecture, 'topo_ph_backend', 'auto')
                 self.topo_layers.append(
                     TopologyLayer(eqv_features=next_layer_features,
                                   hidden_dim=topo_hidden,
@@ -72,7 +73,8 @@ class BaseModel(nn.Module):
                                   norm_stats=norm_stats,
                                   essential=essential,
                                   filt_squash=filt_squash,
-                                  num_filtrations=num_filt)
+                                  num_filtrations=num_filt,
+                                  ph_backend=ph_backend)
                 )
             last_layer_features = next_layer_features
 
@@ -109,7 +111,14 @@ class BaseModel(nn.Module):
     def _build_simplicial_complexes(self, input):
         """Extract adjacency from channel 0 and build (cached) clique-complex
         structures per graph."""
-        adj_batch = input[:, 0, :, :].detach().cpu().numpy()
+        adj_batch = getattr(input, '_host_adj', None)
+        if adj_batch is None:            # no host copy provided: sync fallback
+            adj_batch = input[:, 0, :, :].detach().cpu().numpy()
+        n_real = getattr(input, '_n_real', None)
+        if n_real is not None:           # padded batch: each graph's own size
+            max_dim = getattr(self.config.architecture, 'topo_max_simplex_dim', 2)
+            return build_graph_structs(
+                [adj_batch[b, :n, :n] for b, n in enumerate(n_real)], max_dim=max_dim)
         max_dim = getattr(self.config.architecture, 'topo_max_simplex_dim', 2)
         return build_graph_structs(adj_batch, max_dim=max_dim)
 
@@ -123,10 +132,17 @@ class BaseModel(nn.Module):
         if self.use_topology:
             simplices_batch = self._build_simplicial_complexes(input)
 
+        node_mask = getattr(input, '_node_mask', None)
+        mask2d = None
+        if node_mask is not None:
+            mask2d = (node_mask[:, :, None] & node_mask[:, None, :])[:, None].to(x.dtype)
+        pool = (layers.diag_offdiag_maxpool if node_mask is None else
+                (lambda t: layers.diag_offdiag_maxpool_masked(t, node_mask)))
+
         for i, block in enumerate(self.reg_blocks):
 
             # Step 1: equivariant update: X^(l+1/2) = EqvLayer(X^(l))
-            x = block(x)
+            x = block(x, mask2d)
 
             # Steps 2-5: topology (filtration on X^(l+1/2) -> PH -> broadcast -> fuse)
             if self.use_topology and not isinstance(self.topo_layers[i], nn.Identity):
@@ -136,11 +152,11 @@ class BaseModel(nn.Module):
 
             if self.config.architecture.new_suffix:
                 # use new suffix
-                scores = self.fc_layers[i](layers.diag_offdiag_maxpool(x)) + scores
+                scores = self.fc_layers[i](pool(x)) + scores
 
         if not self.config.architecture.new_suffix:
             # old suffix
-            x = layers.diag_offdiag_maxpool(x)  # NxFxMxM -> Nx2F
+            x = pool(x)  # NxFxMxM -> Nx2F
             for fc in self.fc_layers:
                 x = fc(x)
             scores = x

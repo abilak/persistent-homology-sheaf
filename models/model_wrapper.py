@@ -59,7 +59,9 @@ class ModelWrapper(object):
             return loss, dists
         else:
             loss = F.cross_entropy(scores, labels, reduction='sum')
-            correct_predictions = torch.eq(torch.argmax(scores, dim=1), labels).sum().cpu().item()
+            # kept ON DEVICE: callers accumulate and read it once per epoch
+            # (a per-step .item() is a host sync that stalls the GPU queue)
+            correct_predictions = torch.eq(torch.argmax(scores, dim=1), labels).sum()
             return loss, correct_predictions
 
     def run_model_get_loss_and_results(self, input, labels):

@@ -16,9 +16,15 @@ class RegularBlock(nn.Module):
 
         self.skip = SkipConnection(in_features+out_features, out_features)
 
-    def forward(self, inputs):
+    def forward(self, inputs, mask2d=None):
         mlp1 = self.mlp1(inputs)
         mlp2 = self.mlp2(inputs)
+        if mask2d is not None:
+            # padded batching: zero padded rows/cols of BOTH factors so the
+            # matmul over the node index sums over real nodes only. Everything
+            # else in the block is pointwise, so real positions are exact.
+            mlp1 = mlp1 * mask2d
+            mlp2 = mlp2 * mask2d
 
         mult = torch.matmul(mlp1, mlp2)
 

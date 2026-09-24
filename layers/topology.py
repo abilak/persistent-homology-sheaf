@@ -74,7 +74,7 @@ class GraphStruct:
     """Cached, graph-only structure for the topology branch (device-agnostic
     index tensors are materialized lazily per device)."""
     __slots__ = ("simplices_list", "simplex_to_idx", "S", "M", "dim_batches",
-                 "simplex_dim",
+                 "simplex_dim", "tph",
                  "f_flat_cpu", "f_seg_cpu", "f_counts_cpu",
                  "face_tables_cpu", "_dev_cache")
 
@@ -130,6 +130,7 @@ class GraphStruct:
         self._dev_cache = {}
         # for gudhi.SimplexTree.insert_batch: per dimension, a (k+1, n_k)
         # vertex array and the positions of those simplices in simplices_list
+        self.tph = None      # static arrays for the torch PH backend (lazy)
         self.simplex_dim = [len(sg) - 1 for sg in simplices_list]
         self.dim_batches = []
         for dim in sorted(by_dim):
@@ -170,6 +171,193 @@ def build_graph_structs(adj_batch, max_dim):
     return [get_graph_struct(adj, max_dim) for adj in adj_batch]
 
 
+# --------------------------------------------------------------------------- #
+#  Per-batch plan: every index array the topology branch needs for a batch,
+#  built ONCE on the host in numpy and moved to the device in a single pinned,
+#  non-blocking copy. Shared by all topology layers and filtration heads of a
+#  forward pass (memoized on the batch's struct identities).
+# --------------------------------------------------------------------------- #
+def _tph_static(st):
+    """vertex / edge / triangle local tables of one graph for torch_ph."""
+    if st.tph is None:
+        v_idx, e_idx, e_end, t_idx, t_edges, t_verts = [], [], [], [], [], []
+        eloc = {}
+        for i, sg in enumerate(st.simplices_list):
+            k = len(sg) - 1
+            if k == 0:
+                v_idx.append((sg[0], i))
+            elif k == 1:
+                eloc[tuple(sorted(sg))] = len(e_idx)
+                e_idx.append(i); e_end.append(sorted(sg))
+        for i, sg in enumerate(st.simplices_list):
+            if len(sg) == 3:
+                a, b, c = sorted(sg)
+                t_idx.append(i); t_verts.append((a, b, c))
+                t_edges.append((eloc[(a, b)], eloc[(a, c)], eloc[(b, c)]))
+        vi = np.zeros(st.M, dtype=np.int64)
+        for v, i in v_idx:
+            vi[v] = i
+        st.tph = dict(v=vi, e=np.asarray(e_idx, np.int64),
+                      eend=np.asarray(e_end, np.int64).reshape(-1, 2),
+                      t=np.asarray(t_idx, np.int64),
+                      tedges=np.asarray(t_edges, np.int64).reshape(-1, 3),
+                      tverts=np.asarray(t_verts, np.int64).reshape(-1, 3))
+    return st.tph
+
+
+class BatchPlan:
+    TORCH_PH_MAX_TRIANGLES = 16      # larger batches -> gudhi path
+
+    def __init__(self, structs, device, reps=1, max_ph_dim=1, max_simplex_dim=None,
+                 backend='auto', M_pad=None):
+        B = len(structs)
+        if max_simplex_dim is None:
+            max_simplex_dim = max((max(st.simplex_dim) for st in structs if st.S), default=0)
+        self.B, self.reps, self.device = B, reps, device
+        # M: node dimension of the batch tensor. Without padding every graph
+        # has M nodes; with padded batching graphs have st.M <= M and their
+        # (i, j) positions are re-indexed into the padded M x M grid.
+        self.M = M_pad if M_pad is not None else (structs[0].M if B else 0)
+        self.same_M = all(st.M <= self.M for st in structs) if M_pad is not None \
+            else all(st.M == self.M for st in structs)
+        S = np.asarray([st.S for st in structs], np.int64)
+        self.S = S
+        off = np.concatenate([[0], np.cumsum(S)[:-1]]) if B else np.zeros(0, np.int64)
+        S_tot = int(S.sum())
+        self.S_tot = S_tot
+        arrays = {}
+        # learned filtration gather (one repetition; every head reuses it)
+        if self.same_M and S_tot:
+            MM = self.M * self.M
+            def _flat(st):
+                f = st.f_flat_cpu.numpy()
+                if st.M == self.M:
+                    return f
+                return (f // st.M) * self.M + (f % st.M)
+            arrays['f_flat'] = np.concatenate(
+                [_flat(st) + b * MM for b, st in enumerate(structs) if st.S])
+            arrays['f_seg'] = np.concatenate(
+                [st.f_seg_cpu.numpy() + off[b] for b, st in enumerate(structs) if st.S])
+            arrays['f_counts'] = np.concatenate(
+                [st.f_counts_cpu.numpy().astype(np.int64) for st in structs if st.S])
+        # face tables for all reps x graphs (item k = r * B + b)
+        dims = sorted({d for st in structs for d in st.face_tables_cpu})
+        self.face_dims = dims
+        for d in dims:
+            sims, faces = [], []
+            for r in range(reps):
+                for b, st in enumerate(structs):
+                    if d in st.face_tables_cpu:
+                        a_, f_ = st.face_tables_cpu[d]
+                        o = r * S_tot + off[b]
+                        sims.append(a_.numpy() + o); faces.append(f_.numpy() + o)
+            arrays[f'sim{d}'] = np.concatenate(sims)
+            arrays[f'face{d}'] = np.concatenate(faces)
+        # torch PH backend eligibility (decided on host: no sync)
+        T_max = max((len(_tph_static(st)['t']) for st in structs), default=0) \
+            if max_simplex_dim >= 2 else 0
+        self.use_torch_ph = (backend == 'torch' or (backend == 'auto' and device.type != 'cpu')) \
+            and self.same_M and max_ph_dim <= 1 and max_simplex_dim <= 2 \
+            and T_max <= self.TORCH_PH_MAX_TRIANGLES and S_tot > 0
+        if backend == 'torch' and not self.use_torch_ph:
+            pass    # unsupported config -> falls back to gudhi silently
+        if self.use_torch_ph:
+            arrays.update(self._torch_ph_arrays(structs, off, S_tot, reps, T_max))
+        # one pinned, non-blocking host->device copy for everything
+        keys = list(arrays)
+        flat = np.concatenate([arrays[k].reshape(-1) for k in keys]) if keys else np.zeros(0, np.int64)
+        t = torch.from_numpy(flat.astype(np.int64))
+        if device.type == 'cuda':
+            t = t.pin_memory().to(device, non_blocking=True)
+        else:
+            t = t.to(device)
+        self.t = {}
+        pos = 0
+        for k in keys:
+            a = arrays[k]
+            self.t[k] = t[pos:pos + a.size].reshape(a.shape); pos += a.size
+        if self.same_M and S_tot:
+            self.f_counts = self.t['f_counts']
+        if self.use_torch_ph:
+            tp = dict(self._tph_meta)
+            for k in ('vg', 'eg', 'ea', 'eb', 'tg', 'te', 'item'):
+                if k in self.t:
+                    tp[k] = self.t[k]
+            for k in ('vmask', 'emask', 'tmask'):
+                if k in self.t:
+                    tp[k] = self.t[k].bool()
+            N, n, m = tp['N'], tp['n'], tp['m']
+            if m:
+                inc = torch.zeros(N, m, n, device=device)
+                bi = torch.arange(N, device=device)[:, None].expand(N, m)
+                ei = torch.arange(m, device=device)[None, :].expand(N, m)
+                w = tp['emask'].to(inc.dtype)
+                inc.index_put_((bi, ei, tp['ea']), w, accumulate=True)
+                inc.index_put_((bi, ei, tp['eb']), w, accumulate=True)
+                tp['incE'] = inc.clamp(max=1)
+            else:
+                tp['incE'] = torch.zeros(N, 1, n, device=device)
+            if tp['T']:
+                T = tp['T']
+                inc = torch.zeros(N, T, n, device=device)
+                bi = torch.arange(N, device=device)[:, None].expand(N, T)
+                ti = torch.arange(T, device=device)[None, :].expand(N, T)
+                w = tp['tmask'].to(inc.dtype)
+                for c in range(3):
+                    inc.index_put_((bi, ti, self.t['tv'][:, :, c]), w, accumulate=True)
+                tp['incT'] = inc.clamp(max=1)
+            self.torch_ph = tp
+
+    def _torch_ph_arrays(self, structs, off, S_tot, reps, T_max):
+        B, n = len(structs), self.M
+        m = max(len(_tph_static(st)['e']) for st in structs)
+        N = B * reps
+        vg = np.zeros((N, n), np.int64); vmask = np.zeros((N, n), np.int64)
+        eg = np.zeros((N, max(m, 1)), np.int64); emask = np.zeros_like(eg)
+        ea = np.zeros_like(eg); eb = np.zeros_like(eg)
+        T = T_max
+        tg = np.zeros((N, max(T, 1)), np.int64); tmask = np.zeros_like(tg)
+        te = np.zeros((N, max(T, 1), 3), np.int64); tv = np.zeros_like(te)
+        item = np.arange(N, dtype=np.int64)
+        for r in range(reps):
+            for b, st in enumerate(structs):
+                k = r * B + b; o = r * S_tot + off[b]
+                d = _tph_static(st)
+                vg[k, :st.M] = d['v'] + o; vmask[k, :st.M] = 1
+                me = len(d['e'])
+                if me:
+                    eg[k, :me] = d['e'] + o; emask[k, :me] = 1
+                    ea[k, :me] = d['eend'][:, 0]; eb[k, :me] = d['eend'][:, 1]
+                mt = len(d['t'])
+                if mt and T:
+                    tg[k, :mt] = d['t'] + o; tmask[k, :mt] = 1
+                    te[k, :mt] = d['tedges']; tv[k, :mt] = d['tverts']
+        self._tph_meta = dict(N=N, n=n, m=m, T=T)
+        out = dict(vg=vg, vmask=vmask, eg=eg[:, :m] if m else eg[:, :0],
+                   emask=emask[:, :m] if m else emask[:, :0],
+                   ea=ea[:, :m] if m else ea[:, :0], eb=eb[:, :m] if m else eb[:, :0],
+                   item=item)
+        if T:
+            out.update(tg=tg, tmask=tmask, te=te, tv=tv)
+        return out
+
+
+_PLAN_CACHE = {}
+
+
+def get_plan(structs, device, reps=1, max_ph_dim=1, max_simplex_dim=None, backend='auto',
+             M_pad=None):
+    key = (tuple(map(id, structs)), reps, str(device), max_ph_dim, max_simplex_dim, backend, M_pad)
+    p = _PLAN_CACHE.get(key)
+    if p is None:
+        if len(_PLAN_CACHE) > 8:
+            _PLAN_CACHE.clear()
+        p = BatchPlan(structs, device, reps, max_ph_dim, max_simplex_dim, backend, M_pad)
+        _PLAN_CACHE[key] = p
+    return p
+
+
+
 class LearnedFiltration(nn.Module):
     """
     Learned filtration f(sigma) = rho( mean_{(i,j) in sigma x sigma} X_ij ),
@@ -194,7 +382,7 @@ class LearnedFiltration(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, pair_features, structs):
+    def forward(self, pair_features, structs, plan=None):
         """
         Args:
             pair_features: B x d x M x M
@@ -209,6 +397,18 @@ class LearnedFiltration(nn.Module):
         """
         B, d, M, _ = pair_features.shape
         device = pair_features.device
+
+        if plan is not None and plan.same_M and plan.S_tot and plan.M == M:
+            pf = pair_features.permute(0, 2, 3, 1).reshape(B * M * M, d)
+            sums = torch.zeros(plan.S_tot, d, device=device, dtype=pf.dtype)
+            sums = sums.index_add(0, plan.t['f_seg'], pf[plan.t['f_flat']])
+            vals = self.mlp(sums / plan.f_counts.to(pf.dtype).unsqueeze(-1)).squeeze(-1)
+            if self.squash:
+                vals = torch.tanh(vals)
+            out, cur = [], 0
+            for st in structs:
+                out.append((st, vals[cur:cur + st.S])); cur += st.S
+            return out
 
         flat_list, seg_list, cnt_list, sizes = [], [], [], []
         seg_off = 0
@@ -351,9 +551,13 @@ class DifferentiablePH(nn.Module):
     @staticmethod
     def _seg_softmax(logits, seg, n_seg):
         """softmax of logits (N,) within segments seg (N,) -> weights (N,)."""
-        mx = torch.full((n_seg,), float('-inf'), device=logits.device,
-                        dtype=logits.dtype)
-        mx = mx.scatter_reduce(0, seg, logits, reduce='amax', include_self=True)
+        if logits.device.type == 'mps':   # no scatter_reduce on MPS: shift by the
+            mx = (logits.detach().amax() if logits.numel() else   # global max
+                  logits.new_zeros(())).expand(n_seg)
+        else:
+            mx = torch.full((n_seg,), float('-inf'), device=logits.device,
+                            dtype=logits.dtype)
+            mx = mx.scatter_reduce(0, seg, logits.detach(), reduce='amax', include_self=True)
         e = torch.exp(logits - mx[seg])
         den = torch.zeros(n_seg, device=logits.device, dtype=logits.dtype)
         den = den.index_add(0, seg, e)
@@ -366,14 +570,14 @@ class DifferentiablePH(nn.Module):
         (n_seg*M, v) plus per-(seg,node) counts."""
         v = self.vec_dim
         dev, dt = q.device, q.dtype
+        # every dimension's MLP on all rows, then select: no data-dependent
+        # control flow (a `.any()` / `nonzero` here would sync the GPU)
         emb = torch.zeros(q.shape[0], v, device=dev, dtype=dt)
         logit = torch.zeros(q.shape[0], device=dev, dtype=dt)
         for d in range(P1):
-            m = dims == d
-            if bool(m.any()):
-                emb = emb.index_put((m.nonzero(as_tuple=True)[0],), embeds[d](q[m]))
-                logit = logit.index_put((m.nonzero(as_tuple=True)[0],),
-                                        attns[d](q[m]).squeeze(-1))
+            m = (dims == d)
+            emb = torch.where(m[:, None], embeds[d](q), emb)
+            logit = torch.where(m, attns[d](q).squeeze(-1), logit)
         w = self._seg_softmax(logit, seg, n_seg)
         gpool = torch.zeros(n_seg, v, device=dev, dtype=dt).index_add(
             0, seg, w.unsqueeze(-1) * emb)
@@ -388,45 +592,143 @@ class DifferentiablePH(nn.Module):
             0, gid, torch.ones_like(wn))
         return gpool, npool, ncount
 
-    def forward(self, filt_batch, device, num_nodes=None):
+    def forward(self, filt_batch, device, num_nodes=None, plan=None):
         B = len(filt_batch)
         P1 = self.max_ph_dim + 1
         M = num_nodes
         node_level = M is not None
-        if not GUDHI_AVAILABLE:
-            gv = torch.zeros(B, self.out_features, device=device)
-            nv = torch.zeros(B, self.node_out_features, M,
-                             device=device) if node_level else None
-            return gv, nv
-
-        # Phase 1 (device): batched non-decreasing correction, one host copy.
+        zeros_out = lambda: (torch.zeros(B, self.out_features, device=device),
+                             torch.zeros(B, self.node_out_features, M, device=device)
+                             if node_level else None)
+        # Phase 1 (device): batched non-decreasing correction.
         offsets, cat_parts, off = [], [], 0
         for st, ft in filt_batch:
             offsets.append(None if st.S == 0 else off)
             if st.S:
                 cat_parts.append(ft); off += st.S
         if not cat_parts:
-            gv = torch.zeros(B, self.out_features, device=device)
-            nv = torch.zeros(B, self.node_out_features, M,
-                             device=device) if node_level else None
-            return gv, nv
+            return zeros_out()
         vals_cat = torch.cat(cat_parts)
-        dim_sim, dim_face = defaultdict(list), defaultdict(list)
-        for (st, _), o in zip(filt_batch, offsets):
-            if o is None:
-                continue
-            for dmn, (sim_t, face_t) in st.on(device)[3].items():
-                dim_sim[dmn].append(sim_t + o); dim_face[dmn].append(face_t + o)
-        tables = [(torch.cat(dim_sim[dd]), torch.cat(dim_face[dd]))
-                  for dd in sorted(dim_sim)]
+        if plan is not None and plan.reps * plan.B == B:
+            tables = [(plan.t[f'sim{d}'], plan.t[f'face{d}']) for d in plan.face_dims]
+        else:
+            dim_sim, dim_face = defaultdict(list), defaultdict(list)
+            for (st, _), o in zip(filt_batch, offsets):
+                if o is None:
+                    continue
+                for dmn, (sim_t, face_t) in st.on(device)[3].items():
+                    dim_sim[dmn].append(sim_t + o); dim_face[dmn].append(face_t + o)
+            tables = [(torch.cat(dim_sim[dd]), torch.cat(dim_face[dd]))
+                      for dd in sorted(dim_sim)]
         adj = self._make_non_decreasing(vals_cat, tables)
+
+        if plan is not None and plan.use_torch_ph and plan.reps * plan.B == B:
+            # GPU-resident persistence: no host synchronization anywhere
+            from layers.torch_ph import torch_persistence
+            blocks = torch_persistence(adj, plan, P1, self.essential, node_level, M)
+            return self._vectorize_dense(blocks, B, P1, M, adj.dtype, device)
+        else:
+            if not GUDHI_AVAILABLE:
+                return zeros_out()
+            coo = self._gudhi_pairs(adj, filt_batch, offsets, P1, M, device)
+        return self._vectorize(adj, coo, B, P1, M)
+
+    @staticmethod
+    def _masked_softmax(logits, mask, dim):
+        """softmax over `dim` restricted to mask; all-masked slices -> 0.
+        The max shift is detached (softmax is shift-invariant), so no
+        gradient flows through it and no NaN appears for empty slices."""
+        neg = torch.finfo(logits.dtype).min
+        mx = torch.where(mask, logits, torch.full_like(logits, neg)).detach().amax(dim, keepdim=True)
+        mx = torch.where(mx > neg, mx, torch.zeros_like(mx))
+        e = torch.exp(torch.where(mask, logits - mx, torch.full_like(logits, neg))) * mask
+        return e / e.sum(dim, keepdim=True).clamp_min(torch.finfo(logits.dtype).tiny)
+
+    def _dense_block(self, emb_mlp, attn_mlp, q, valid, inv, node_level):
+        """q (N, R, c) inputs, valid (N, R), inv (N, R, n). Returns graph pool
+        (N, v), count (N,), node pool (N, n, v), node count (N, n)."""
+        emb = emb_mlp(q)                                    # (N, R, v)
+        logit = attn_mlp(q).squeeze(-1)                     # (N, R)
+        w = self._masked_softmax(logit, valid, dim=1)
+        gpool = torch.einsum('nr,nrv->nv', w, emb)
+        cnt = valid.sum(1).to(q.dtype)
+        if not node_level:
+            return gpool, cnt, None, None
+        nm = inv & valid[:, :, None]                        # (N, R, n)
+        wn = self._masked_softmax(logit[:, :, None].expand_as(nm), nm, dim=1)
+        npool = torch.einsum('nru,nrv->nuv', wn, emb)       # (N, n, v)
+        ncnt = nm.sum(1).to(q.dtype)                        # (N, n)
+        return gpool, cnt, npool, ncnt
+
+    def _vectorize_dense(self, blocks, B, P1, M, dt, device):
+        node_level = M is not None
+        g_dims, n_dims = [], []
+        for d in range(P1):
+            g_parts, n_parts = [], []
+            fb = blocks.get(('fin', d))
+            if fb is None:            # no candidate axis (e.g. no triangles)
+                N = B
+                gp = torch.zeros(N, self.vec_dim, device=device, dtype=dt)
+                cnt = torch.zeros(N, device=device, dtype=dt)
+                mean = std = torch.zeros(N, 2, device=device, dtype=dt)
+                npool = torch.zeros(N, M, self.vec_dim, device=device, dtype=dt) if node_level else None
+                ncnt = torch.zeros(N, M, device=device, dtype=dt) if node_level else None
+            else:
+                valid = fb['valid']
+                bv, dv = fb['b'], fb['d']
+                bp_raw = torch.stack([bv, torch.clamp(dv - bv, min=0)], dim=-1)   # (N,R,2)
+                bp_raw = torch.where(valid[..., None], bp_raw, torch.zeros_like(bp_raw))
+                vf = valid[..., None].to(dt)
+                c = vf.sum(1).clamp_min(1)                                       # (N,1)
+                mean = (bp_raw * vf).sum(1) / c                                  # (N,2)
+                cen = (bp_raw - mean[:, None, :]) * vf
+                var = (cen * cen).sum(1) / c
+                posv = var > 0
+                std = torch.where(posv, torch.sqrt(torch.where(posv, var, torch.ones_like(var))),
+                                  torch.zeros_like(var))
+                q = cen / (std[:, None, :] + 1e-8)
+                gp, cnt, npool, ncnt = self._dense_block(
+                    self.embeds[d], self.attns[d], q, valid, fb['inv'], node_level)
+            g_parts.append(gp)
+            if self.multiplicity:
+                g_parts.append(torch.log1p(cnt)[:, None])
+            if self.scale_stats:
+                g_parts += [mean, std]
+            if node_level:
+                n_parts.append(npool)
+                if self.multiplicity:
+                    n_parts.append(torch.log1p(ncnt)[..., None])
+            if self.essential:
+                eb = blocks.get(('ess', d))
+                if eb is None:
+                    N = B
+                    egp = torch.zeros(N, self.vec_dim, device=device, dtype=dt)
+                    ecnt = torch.zeros(N, device=device, dtype=dt)
+                    enp = torch.zeros(N, M, self.vec_dim, device=device, dtype=dt) if node_level else None
+                    encnt = torch.zeros(N, M, device=device, dtype=dt) if node_level else None
+                else:
+                    q = torch.where(eb['valid'], eb['b'], torch.zeros_like(eb['b']))[..., None]
+                    egp, ecnt, enp, encnt = self._dense_block(
+                        self.ess_embeds[d], self.ess_attns[d], q, eb['valid'], eb['inv'], node_level)
+                g_parts += [egp, torch.log1p(ecnt)[:, None]]
+                if node_level:
+                    n_parts += [enp, torch.log1p(encnt)[..., None]]
+            g_dims.append(torch.cat(g_parts, dim=1))                       # (N, per_dim_graph)
+            if node_level:
+                n_dims.append(torch.cat(n_parts, dim=2).permute(0, 2, 1))  # (N, per_dim_node, n)
+        graph_out = torch.cat(g_dims, dim=1)
+        node_out = torch.cat(n_dims, dim=1) if node_level else None
+        return graph_out, node_out
+
+    def _gudhi_pairs(self, adj, filt_batch, offsets, P1, M, device):
+        """Host path: gudhi + integer bookkeeping (one device->host copy of
+        the filtration, one host->device copy of all indices)."""
+        node_level = M is not None
         host = adj.detach().cpu().numpy().astype(np.float64)
         host_list = host.tolist()
-
-        # Phase 2 (host): persistence + integer bookkeeping.
-        f_seg, f_b, f_d = [], [], []          # finite pairs
-        e_seg, e_b = [], []                   # essential classes
-        fn_r, fn_c, en_r, en_c = [], [], [], []   # node involvement (row, node)
+        f_seg, f_b, f_d = [], [], []
+        e_seg, e_b = [], []
+        fn_r, fn_c, en_r, en_c = [], [], [], []
         for bi, ((st, _), o) in enumerate(zip(filt_batch, offsets)):
             if o is None:
                 continue
@@ -472,45 +774,48 @@ class DifferentiablePH(nn.Module):
                         if n < M:
                             fn_r.append(len(f_b)); fn_c.append(n)
                 f_seg.append(seg); f_b.append(o + b_idx); f_d.append(o + d_idx)
+        lists = [f_seg, f_b, f_d, e_seg, e_b, fn_r, fn_c, en_r, en_c]
+        lens = [len(a) for a in lists]
+        packed = torch.as_tensor(
+            np.fromiter((x for a in lists for x in a), dtype=np.int64,
+                        count=sum(lens)), device=device)
+        out = list(torch.split(packed, lens))
+        if not node_level:
+            out[5:] = [None] * 4
+        return out
 
-        # Phase 3 (device): vectorized vectorization.
+    def _vectorize(self, adj, coo, B, P1, M):
+        """Shared device-side vectorization. Rows whose segment is the trash
+        segment (index B*P1) and node entries in the trash column (index M)
+        are computed but discarded, which lets the torch backend avoid any
+        data-dependent (syncing) compaction."""
+        f_seg, f_b, f_d, e_seg, e_b, fn_r, fn_c, en_r, en_c = coo
+        node_level = M is not None
+        device, dt = adj.device, adj.dtype
         n_seg = B * P1
-        dt = adj.dtype
-        # all index lists -> ONE host-to-device copy, split on device
-        _lists = [f_seg, f_b, f_d, e_seg, e_b, fn_r, fn_c, en_r, en_c]
-        _lens = [len(a) for a in _lists]
-        _packed = torch.as_tensor(
-            np.fromiter((x for a in _lists for x in a), dtype=np.int64,
-                        count=sum(_lens)), device=device)
-        _split = dict(zip(map(id, _lists), torch.split(_packed, _lens)))
-        LT = lambda a: _split[id(a)]
-        v = self.vec_dim
+        n_all = n_seg + 1                    # + trash segment
+        Ms = (M + 1) if node_level else None  # + trash node column
         g_blocks, n_blocks = [], []
 
         # finite pairs -> [pooled(v), mult?, stats(4)?]
-        seg_t = LT(f_seg)
-        if len(f_b):
-            bv = adj[LT(f_b)]; dv = adj[LT(f_d)]
-            bp_raw = torch.stack([bv, torch.clamp(dv - bv, min=0)], dim=1)
-        else:
-            bp_raw = torch.zeros(0, 2, device=device, dtype=dt)
-        cnt = torch.zeros(n_seg, device=device, dtype=dt).index_add(
-            0, seg_t, torch.ones(len(f_b), device=device, dtype=dt))
+        seg_t = f_seg
+        bv = adj[f_b]; dv = adj[f_d]
+        bp_raw = torch.stack([bv, torch.clamp(dv - bv, min=0)], dim=1)
+        ones = torch.ones(bp_raw.shape[0], device=device, dtype=dt)
+        cnt = torch.zeros(n_all, device=device, dtype=dt).index_add(0, seg_t, ones)
         cden = cnt.clamp_min(1).unsqueeze(-1)
-        mean = torch.zeros(n_seg, 2, device=device, dtype=dt).index_add(
-            0, seg_t, bp_raw) / cden
+        mean = torch.zeros(n_all, 2, device=device, dtype=dt).index_add(0, seg_t, bp_raw) / cden
         cen = bp_raw - mean[seg_t]
-        var = torch.zeros(n_seg, 2, device=device, dtype=dt).index_add(
-            0, seg_t, cen * cen) / cden
+        var = torch.zeros(n_all, 2, device=device, dtype=dt).index_add(0, seg_t, cen * cen) / cden
         # sqrt has an infinite derivative at 0 (empty / single-pair / constant
         # segments); evaluate it only where var > 0 so no NaN enters backward.
-        pos = var > 0
-        std = torch.where(pos, torch.sqrt(torch.where(pos, var, torch.ones_like(var))),
+        posv = var > 0
+        std = torch.where(posv, torch.sqrt(torch.where(posv, var, torch.ones_like(var))),
                           torch.zeros_like(var))
         q = cen / (std[seg_t] + 1e-8)
         gpool, npool, ncnt = self._pool(
-            q, seg_t, n_seg, self.embeds, self.attns, seg_t % P1, P1,
-            LT(fn_r) if node_level else None, LT(fn_c) if node_level else None, M)
+            q, seg_t, n_all, self.embeds, self.attns, seg_t % P1, P1,
+            fn_r, fn_c, Ms)
         g_blocks.append(gpool)
         if self.multiplicity:
             g_blocks.append(torch.log1p(cnt).unsqueeze(-1))
@@ -523,22 +828,21 @@ class DifferentiablePH(nn.Module):
 
         # essential classes -> [pooled(v), mult]
         if self.essential:
-            eseg = LT(e_seg)
-            eq = (adj[LT(e_b)] if len(e_b) else
-                  torch.zeros(0, device=device, dtype=dt)).unsqueeze(-1)
-            ecnt = torch.zeros(n_seg, device=device, dtype=dt).index_add(
-                0, eseg, torch.ones(len(e_b), device=device, dtype=dt))
+            eq = adj[e_b].unsqueeze(-1)
+            ecnt = torch.zeros(n_all, device=device, dtype=dt).index_add(
+                0, e_seg, torch.ones(e_b.shape[0], device=device, dtype=dt))
             egp, enp, encnt = self._pool(
-                eq, eseg, n_seg, self.ess_embeds, self.ess_attns, eseg % P1, P1,
-                LT(en_r) if node_level else None, LT(en_c) if node_level else None, M)
+                eq, e_seg, n_all, self.ess_embeds, self.ess_attns, e_seg % P1, P1,
+                en_r, en_c, Ms)
             g_blocks += [egp, torch.log1p(ecnt).unsqueeze(-1)]
             if node_level:
                 n_blocks += [enp, torch.log1p(encnt).unsqueeze(-1)]
 
-        graph_out = torch.cat(g_blocks, dim=1).reshape(B, P1 * self.per_dim_graph)
+        graph_out = torch.cat(g_blocks, dim=1)[:n_seg].reshape(B, P1 * self.per_dim_graph)
         node_out = None
         if node_level:
-            node_out = (torch.cat(n_blocks, dim=1)            # (n_seg*M, C)
+            node_out = (torch.cat(n_blocks, dim=1)            # (n_all*Ms, C)
+                        .reshape(n_all, Ms, self.per_dim_node)[:n_seg, :M]
                         .reshape(B, P1, M, self.per_dim_node)
                         .permute(0, 1, 3, 2)
                         .reshape(B, P1 * self.per_dim_node, M))
@@ -574,7 +878,7 @@ class TopologyLayer(nn.Module):
                  gate_bias=2.0, node_level=True, multiplicity=False,
                  scale_stats=False, gate_mode='conv', gate_init=0.0,
                  norm_stats=False, essential=False, filt_squash=False,
-                 num_filtrations=1):
+                 num_filtrations=1, ph_backend='auto'):
         super().__init__()
         self.node_level = node_level
         self.norm_stats = norm_stats
@@ -587,6 +891,10 @@ class TopologyLayer(nn.Module):
         # through PH as ONE batch (B * m items). Zero weights on the extra
         # heads' channels recover the single-filtration model exactly.
         self.num_filtrations = num_filtrations
+        # 'auto': GPU-resident PH (layers/torch_ph.py) on accelerators when the
+        # complex is <= 2-dim, homology <= 1 and triangles are few; else gudhi.
+        # 'torch' forces the torch path where supported; 'gudhi' disables it.
+        self.ph_backend = ph_backend
         self.extra_filtrations = nn.ModuleList(
             LearnedFiltration(eqv_features, hidden_dim, squash=filt_squash)
             for _ in range(num_filtrations - 1))
@@ -663,12 +971,14 @@ class TopologyLayer(nn.Module):
         if self.frozen:                              # warm-start: skip topology
             self.last_graph_vec = None
             return x_eqv
-        filt_batch = self.filtration(x_eqv, structs)
+        plan = get_plan(structs, x_eqv.device, reps=self.num_filtrations,
+                        max_ph_dim=self.ph.max_ph_dim, backend=self.ph_backend, M_pad=M)
+        filt_batch = self.filtration(x_eqv, structs, plan)
         for head in self.extra_filtrations:          # head-major: (m * B) items
-            filt_batch = filt_batch + head(x_eqv, structs)
+            filt_batch = filt_batch + head(x_eqv, structs, plan)
         graph_vec, node_vec = self.ph(
             filt_batch, device=x_eqv.device,
-            num_nodes=M if self.node_level else None)
+            num_nodes=M if self.node_level else None, plan=plan)
         m = self.num_filtrations
         # (m*B, F) head-major -> per-head normalization -> (B, m*F')
         graph_vec = self.topo_norm(graph_vec).reshape(m, B, -1)
