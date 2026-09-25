@@ -124,8 +124,10 @@ class BaseModel(nn.Module):
 
     def forward(self, input):
         x = input
-        scores = torch.tensor(0, device=input.device, dtype=x.dtype)
-        topo_scores = torch.tensor(0, device=input.device, dtype=x.dtype)
+        # zeros created ON the device: torch.tensor(0, device=cuda) copies a
+        # host scalar from pageable memory, which synchronizes the stream
+        scores = x.new_zeros(())
+        topo_scores = x.new_zeros(())
 
         # Build simplicial complexes once from input adjacency
         simplices_batch = None

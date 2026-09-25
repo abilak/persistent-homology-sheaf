@@ -103,6 +103,13 @@ if dev.type == 'cuda':
                 if 'synchroniz' not in str(e):
                     raise
                 n_sync += 1     # expected only for batches needing convergence checks
+                if n_sync == 1:     # show WHERE the first sync happens
+                    import traceback
+                    frames = [f for f in traceback.extract_tb(e.__traceback__)
+                              if 'site-packages' not in f.filename]
+                    where = "; ".join(f"{os.path.relpath(f.filename)}:{f.lineno} ({f.line})"
+                                      for f in frames[-3:])
+                    print(f"    first sync (cycle rank {K}): {where}")
             finally:
                 torch.cuda.set_sync_debug_mode(0)
         print(f"[3] {ds}: {n_ok} steps with zero host syncs, {n_sync} with syncs "
