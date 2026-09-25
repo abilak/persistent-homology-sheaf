@@ -19,16 +19,27 @@ torch.manual_seed(0); np.random.seed(0)
 cfg = build_config(ds, model, None if model == 'baseline' else FULL); cfg.num_fold = 1
 data = DataGenerator(cfg); mw = ModelWrapper(cfg, data); tr = Trainer(mw, data, cfg)
 mw.train(); data.initialize('train')
+
+
+def step():
+    """one train step; starts a new epoch when the current one runs out
+    (small datasets such as MUTAG have fewer batches than the benchmark)"""
+    try:
+        tr.train_step()
+    except StopIteration:
+        data.initialize('train')
+        tr.train_step()
+
 sync = (lambda: torch.mps.synchronize()) if dev == 'mps' else \
        ((lambda: torch.cuda.synchronize()) if dev.startswith('cuda') else (lambda: None))
-for _ in range(4): tr.train_step()
+for _ in range(4): step()
 sync(); t0 = time.time(); ng = 0
 # SYNC_DEBUG=1 on CUDA: raise on ANY implicit host<->device synchronization
 # inside the timed steps (the torch PH backend should trigger none).
 if os.environ.get('SYNC_DEBUG') == '1' and dev.startswith('cuda'):
     torch.cuda.set_sync_debug_mode('error')
 for _ in range(nb):
-    tr.train_step()
+    step()
 if dev.startswith('cuda'):
     torch.cuda.set_sync_debug_mode(0)
 sync(); dt = time.time() - t0
