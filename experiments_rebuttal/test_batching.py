@@ -8,6 +8,12 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np, torch
+# float64: this suite checks LOGIC (batched == per-graph, equivariance). In
+# float32 the result depends on the BLAS's summation order, which differs
+# between platforms (Accelerate / MKL / OpenBLAS); near-tied simplices can then
+# pair differently in the batched and per-graph runs. In float64 the
+# comparison is platform-independent and a real bug still shows up.
+torch.set_default_dtype(torch.float64)
 import layers.topology as T
 
 
@@ -101,15 +107,15 @@ if __name__ == '__main__':
             for sc in (False, True):
               for ns in (False, True):
                 df, dg = test_batch_vs_single(nl, mult, sc, ns)
-                good = df < 1e-5 and dg < 1e-5
+                good = df < 1e-9 and dg < 1e-9
                 ok &= good
                 print(f"  node_level={nl!s:<5} mult={mult!s:<5} scale={sc!s:<5} norm_stats={ns!s:<5} "
                       f"fwd={df:.2e} grad={dg:.2e}  [{'OK' if good else 'FAIL'}]")
 
     d_order = test_order_invariance()
-    ok &= d_order < 1e-5
+    ok &= d_order < 1e-9
     print(f"\nbatch order invariance: {d_order:.2e} "
-          f"[{'OK' if d_order < 1e-5 else 'FAIL'}]")
+          f"[{'OK' if d_order < 1e-9 else 'FAIL'}]")
 
     print("\npermutation equivariance:")
     for nl in (True, False):
@@ -117,7 +123,7 @@ if __name__ == '__main__':
             for sc in (False, True):
               for ns in (False, True):
                 e = test_equivariance(nl, mult, sc, ns)
-                good = e < 1e-4
+                good = e < 1e-9
                 ok &= good
                 print(f"  node_level={nl!s:<5} mult={mult!s:<5} scale={sc!s:<5} norm_stats={ns!s:<5} "
                       f"err={e:.2e}  [{'OK' if good else 'FAIL'}]")
