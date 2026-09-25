@@ -18,6 +18,13 @@ if not os.path.exists(REF):
 spec = importlib.util.spec_from_file_location("topo_ref", REF)
 ref = importlib.util.module_from_spec(spec); spec.loader.exec_module(ref)
 import layers.topology as fast
+import layers.torch_ph as fast_ph
+# The reference is the ORIGINAL model, which used an exact zero-persistence
+# test and std epsilon 1e-8. The current model deliberately uses tolerances
+# of 1e-6 for both (float robustness, see torch_ph.PERS_EPS). Restore the old
+# constants here so this test isolates the OPTIMIZATIONS, which must
+# reproduce the original model exactly.
+fast.STD_EPS = 1e-8; fast.PERS_EPS = 0.0; fast_ph.PERS_EPS = 0.0
 
 
 def rand_graph(M, seed):

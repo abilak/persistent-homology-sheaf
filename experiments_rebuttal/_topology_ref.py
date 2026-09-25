@@ -1,3 +1,6 @@
+# Frozen pre-optimization reference implementation (used by test_fast_vs_ref).
+# Semantics updated only where the model itself changed: zero-persistence
+# tolerance (min_persistence=1e-6) and standardization epsilon (1e-6).
 import torch
 import torch.nn as nn
 import numpy as np
@@ -432,7 +435,7 @@ class DifferentiablePH(nn.Module):
             # -- every ring -- would never be computed. Finite pairs cannot
             # occur in the top dimension, so this only adds essential classes;
             # the default (off) path is left bit-identical to the paper model.
-            st_tree.persistence(persistence_dim_max=self.essential)
+            st_tree.persistence(persistence_dim_max=self.essential, min_persistence=1e-6)
             pairs = st_tree.persistence_pairs()
 
             # node-involvement lookup only needed for node-level features
@@ -499,7 +502,7 @@ class DifferentiablePH(nn.Module):
                     continue
                 bp_raw = torch.stack([e[0] for e in entries])
                 bp = ((bp_raw - bp_raw.mean(dim=0))
-                      / (bp_raw.std(dim=0, correction=0) + 1e-8))
+                      / (bp_raw.std(dim=0, correction=0) + 1e-6))
                 embeds = self.embeds[d](bp)
                 logits = self.attns[d](bp)
                 weights = torch.softmax(logits, dim=0)

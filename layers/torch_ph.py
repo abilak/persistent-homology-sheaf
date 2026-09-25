@@ -38,6 +38,16 @@ Zero-persistence pairs are dropped, as gudhi does.
 import numpy as np
 import torch
 
+# Pairs with persistence <= PERS_EPS count as zero-persistence and are dropped
+# (both backends). An exact `death == birth` test is not robust: the max-
+# correction makes birth == death exactly in exact arithmetic for many pairs
+# (ubiquitous with categorical node labels), but float summation order differs
+# between isomorphic inputs, so persistence comes out as 0 or 1e-16 depending
+# on the vertex labelling, and a pair would be dropped for one labelling and
+# counted for the other. With a tolerance, the counted diagram is an
+# isomorphism invariant in floating point as well (away from persistence
+# == PERS_EPS itself).
+PERS_EPS = 1e-6
 FIXED_STEPS_MAX = 64      # use a sync-free fixed schedule up to this many steps
 CHECK_EVERY = 4           # otherwise check convergence every CHECK_EVERY steps
 
@@ -228,7 +238,7 @@ def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
         d0 = ev.gather(1, de)
     else:
         de = torch.zeros_like(vg); msf = torch.zeros(N, 0, dtype=torch.bool, device=dev); d0 = vv
-    fin0 = fin0 & (d0.detach() != vv.detach())
+    fin0 = fin0 & ((d0.detach() - vv.detach()) > PERS_EPS)
     blocks[('fin', 0)] = dict(b=vv, d=d0, valid=fin0, _de=de)
     if essential:
         blocks[('ess', 0)] = dict(b=vv, valid=ess0)
@@ -252,7 +262,7 @@ def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
             e_col = order_e.flip(1)                               # edge local idx of column
             t_of = order_t.gather(1, ((T - 1) - low).clamp(min=0, max=T - 1))
             b1, d1 = ev.gather(1, e_col), tv.gather(1, t_of)
-            f1 = has & col_pos & (b1.detach() != d1.detach())
+            f1 = has & col_pos & ((d1.detach() - b1.detach()) > PERS_EPS)
             blocks[('fin', 1)] = dict(b=b1, d=d1, valid=f1, _e=e_col, _t=t_of, _tv=tv)
             killed_cols = has
             tri_paired = torch.zeros(N, T, dtype=torch.long, device=dev).scatter_add_(
@@ -284,7 +294,7 @@ def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
             t_col = order_t.flip(1)
             q_of = order_q.gather(1, ((Qn - 1) - low).clamp(min=0, max=Qn - 1))
             b2, d2 = tv.gather(1, t_col), qv.gather(1, q_of)
-            f2 = has & col_pos & (b2.detach() != d2.detach())
+            f2 = has & col_pos & ((d2.detach() - b2.detach()) > PERS_EPS)
             blocks[('fin', 2)] = dict(b=b2, d=d2, valid=f2, _t2=t_col, _q=q_of, _qv=qv, _tv=tv)
             if essential:
                 blocks[('ess', 2)] = dict(b=tv.gather(1, t_col), valid=col_pos & ~has,

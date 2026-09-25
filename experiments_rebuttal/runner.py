@@ -343,6 +343,21 @@ FAST = {"padded_batching": True}
 PLANS["improve_all_fast"] = improve_plan(["MUTAG", "PTC", "NCI1", "NCI109",
                                           "PROTEINS", "IMDBBINARY"], extra=FAST, tag="_fast")
 PLANS["improve_big_fast"] = improve_plan(["NCI1", "NCI109"], extra=FAST, tag="_fast")
+PLANS["improve_small_fast"] = improve_plan(["MUTAG", "PTC"], extra=FAST, tag="_fast")
+PLANS["improve_other_fast"] = improve_plan(["PROTEINS", "IMDBBINARY"], extra=FAST, tag="_fast")
+# one plan per dataset, e.g. to pin one dataset per GPU
+for _ds in ["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"]:
+    PLANS[f"improve_{_ds.lower()}_fast"] = improve_plan([_ds], extra=FAST, tag="_fast")
+# same-pipeline message-passing baselines (no padding: they do not support it)
+PLANS["mp_baselines"] = list(jobs_for(["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"],
+                                      ["mlp", "gcn", "gin", "gsn"], [0], range(1, 11)))
+PLANS["smoke_gpu"] = (
+    [dict(dataset="MUTAG", model="baseline", seed=0, fold=f, epochs=3, variant="fast",
+          overrides=dict(FAST)) for f in (1, 2)]
+    + [dict(dataset="MUTAG", model="topo", seed=0, fold=f, epochs=3, variant="full_fast",
+            overrides=dict(FULL, **FAST)) for f in (1, 2)]
+    + [dict(dataset="NCI1", model="topo", seed=0, fold=1, epochs=2, variant="full_fast",
+            overrides=dict(FULL, **FAST))])
 
 
 def result_path(job):

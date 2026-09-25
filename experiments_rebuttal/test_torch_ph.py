@@ -71,13 +71,13 @@ def gudhi_diagrams(st, vals, P):
     for i, sg in enumerate(st.simplices_list):
         t.insert(list(sg), filtration=float(vals[i]))
     t.make_filtration_non_decreasing()
-    t.persistence(persistence_dim_max=True)
+    t.persistence(persistence_dim_max=True, min_persistence=TP.PERS_EPS)
     fin = {d: [] for d in range(P + 1)}; ess = {d: [] for d in range(P + 1)}
     for d in range(P + 1):
         for b, dd in t.persistence_intervals_in_dimension(d):
             if np.isinf(dd):
                 ess[d].append(b)
-            elif dd > b:
+            elif dd - b > TP.PERS_EPS:
                 fin[d].append((b, dd))
     return fin, ess
 
@@ -307,31 +307,43 @@ def part7():
 
 
 def part5():
+    """Permutation invariance of the full model under EXACT ties (one-hot
+    labels): 1/2/4 filtration heads, D = 2 and 3, both PH backends, several
+    graphs and permutations each. (Ties are where float summation-order noise
+    could flip a zero-persistence decision; see torch_ph.PERS_EPS.)"""
     from easydict import EasyDict
     from models.base_model import BaseModel
-    arch = dict(block_features=[16, 16], depth_of_mlp=2, new_suffix=True, use_topology=True,
-                topo_hidden_dim=16, topo_max_ph_dim=2, topo_num_stats=8, topo_max_simplex_dim=3,
-                topo_multiplicity=True, topo_norm_stats=True, topo_essential=True,
-                topo_filt_squash=True, topo_readout=True, topo_num_filtrations=2, topo_ph_backend='torch')
-    torch.manual_seed(0); m = BaseModel(EasyDict(dict(architecture=arch, node_labels=3, num_classes=2))).eval()
-    for fc in m.topo_fc:
-        if isinstance(fc, torch.nn.Linear):
-            torch.nn.init.normal_(fc.weight)
-    rng = np.random.default_rng(4); worst = 0.0
-    for t in range(4):
-        A = rand_graphs(rng, 1, 14, 0.45)[0]
-        x = torch.zeros(1, 4, 14, 14); x[0, 0] = torch.from_numpy(A)
-        lab = rng.integers(0, 3, 14)
-        for v in range(14): x[0, 1 + lab[v], v, v] = 1.0
-        perm = torch.randperm(14)
-        xp = x[:, :, perm][:, :, :, perm]
-        x._host_adj = x[:, 0].numpy(); xp._host_adj = xp[:, 0].numpy()
-        with torch.no_grad():
-            T._PLAN_CACHE.clear(); o1 = m(x)
-            T._PLAN_CACHE.clear(); o2 = m(xp)
-        worst = max(worst, (o1 - o2).abs().max().item())
-    print(f"[5] full model (D=3, H0-H2, 2 heads, torch backend) permutation invariance: {worst:.1e}")
-    return worst < 1e-9
+    worst_all = 0.0; ok = True
+    for heads, D, be in [(1, 2, 'torch'), (2, 2, 'torch'), (4, 2, 'torch'), (2, 2, 'gudhi'),
+                         (2, 3, 'torch'), (2, 3, 'gudhi')]:
+        arch = dict(block_features=[16, 16], depth_of_mlp=2, new_suffix=True, use_topology=True,
+                    topo_hidden_dim=16, topo_max_ph_dim=min(D, 2), topo_num_stats=8,
+                    topo_max_simplex_dim=D, topo_multiplicity=True, topo_norm_stats=True,
+                    topo_essential=True, topo_filt_squash=True, topo_readout=True,
+                    topo_num_filtrations=heads, topo_ph_backend=be)
+        torch.manual_seed(0)
+        m = BaseModel(EasyDict(dict(architecture=arch, node_labels=3, num_classes=2))).eval()
+        for fc in m.topo_fc:
+            if isinstance(fc, torch.nn.Linear):
+                torch.nn.init.normal_(fc.weight)
+        rng = np.random.default_rng(4); torch.manual_seed(1); worst = 0.0
+        for t in range(8):
+            n = int(rng.integers(10, 20)) if D == 2 else int(rng.integers(8, 14))
+            A = rand_graphs(rng, 1, n, float(rng.uniform(0.2, 0.5)))[0]
+            x = torch.zeros(1, 4, n, n); x[0, 0] = torch.from_numpy(A)
+            lab = rng.integers(0, 3, n)
+            for v in range(n): x[0, 1 + lab[v], v, v] = 1.0
+            for _ in range(3):
+                perm = torch.randperm(n)
+                xp = x[:, :, perm][:, :, :, perm]
+                x._host_adj = x[:, 0].numpy(); xp._host_adj = xp[:, 0].numpy()
+                with torch.no_grad():
+                    T._PLAN_CACHE.clear(); o1 = m(x)
+                    T._PLAN_CACHE.clear(); o2 = m(xp)
+                worst = max(worst, (o1 - o2).abs().max().item())
+        good = worst < 1e-9; ok &= good; worst_all = max(worst_all, worst)
+        print(f"[5] invariance, one-hot labels, heads={heads} D={D} {be:5s}: {worst:.1e} [{'OK' if good else 'FAIL'}]")
+    return ok
 
 
 if __name__ == '__main__':

@@ -779,7 +779,7 @@ class DifferentiablePH(nn.Module):
                 posv = var > 0
                 std = torch.where(posv, torch.sqrt(torch.where(posv, var, torch.ones_like(var))),
                                   torch.zeros_like(var))
-                q = cen / (std[:, None, :] + 1e-8)
+                q = cen / (std[:, None, :] + STD_EPS)
                 gp, cnt, npool, ncnt = self._dense_block(
                     self.embeds[d], self.attns[d], q, valid, fb['inv'], node_level)
             g_parts.append(gp)
@@ -830,7 +830,10 @@ class DifferentiablePH(nn.Module):
             for idx, verts in st.dim_batches:
                 tree.insert_batch(verts, vals[idx])
             tree.make_filtration_non_decreasing()
-            tree.persistence(persistence_dim_max=self.essential)
+            # min_persistence: drop pairs with persistence <= PERS_EPS (float-
+            # robust zero-persistence test; see layers/torch_ph.PERS_EPS)
+            tree.persistence(persistence_dim_max=self.essential,
+                             min_persistence=PERS_EPS)
             pairs = tree.persistence_pairs()
             if node_level:
                 vlist = host_list[o:o + st.S]
@@ -905,7 +908,7 @@ class DifferentiablePH(nn.Module):
         posv = var > 0
         std = torch.where(posv, torch.sqrt(torch.where(posv, var, torch.ones_like(var))),
                           torch.zeros_like(var))
-        q = cen / (std[seg_t] + 1e-8)
+        q = cen / (std[seg_t] + STD_EPS)
         gpool, npool, ncnt = self._pool(
             q, seg_t, n_all, self.embeds, self.attns, seg_t % P1, P1,
             fn_r, fn_c, Ms)
@@ -940,6 +943,13 @@ class DifferentiablePH(nn.Module):
                         .permute(0, 1, 3, 2)
                         .reshape(B, P1 * self.per_dim_node, M))
         return graph_out, node_out
+
+
+from layers.torch_ph import PERS_EPS  # noqa: E402
+# epsilon of the per-graph standardization of pair inputs. Matches PERS_EPS:
+# with a smaller value, near-degenerate diagrams (std ~ 1e-10) amplify float
+# summation-order noise by up to 1/eps, which breaks invariance at ~1e-9.
+STD_EPS = 1e-6
 
 
 class InvertibleLayerNorm(nn.Module):
