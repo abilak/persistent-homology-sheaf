@@ -14,6 +14,8 @@
  5. Permutation invariance of the full model on the torch backend.
  6. Pairing-determined coordinates (multiplicities) EXACTLY equal on real
     batches of all six datasets, on tied (unjittered) inputs.
+ 7. The large-graph H0 path (edge-list relaxation): fuzz with it forced, and
+    PROTEINS' largest graphs (up to 620 nodes) against gudhi.
 All in float64."""
 import os, sys, itertools
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -266,6 +268,44 @@ def part6(n_batches=3):
     return ok
 
 
+def part7():
+    """(a) the diagram fuzz with the large-graph H0 path (edge-list
+    relaxation) forced; (b) PROTEINS' 20 largest graphs (up to 620 nodes, the
+    relaxation path in production) against gudhi's own intervals."""
+    old = TP.SQUARING_MAX_N
+    TP.SQUARING_MAX_N = 6
+    ok = part1(n_trials=60)
+    TP.SQUARING_MAX_N = old
+    import data_loader.data_helper as helper
+    graphs, _ = helper.load_dataset('PROTEINS')
+    big = sorted(range(len(graphs)), key=lambda i: -graphs[i].shape[1])[:20]
+    rng = np.random.default_rng(9); bad = 0; cnt = 0; nmax = 0
+    for k in range(0, 20, 2):
+        adjs = [graphs[i][0] for i in big[k:k + 2]]
+        M = max(a.shape[0] for a in adjs); nmax = max(nmax, M)
+        padded = []
+        structs = T.build_graph_structs(adjs, 2)
+        plan = T.BatchPlan(structs, CPU, 1, 1, None, 'torch', M)
+        if not plan.use_torch_ph:
+            print("  (batch above memory cap -> gudhi; skipped)"); continue
+        fs = filtration(rng, structs, False)
+        ph = T.DifferentiablePH(1, 2)
+        tabs = [(plan.t[f'sim{d}'], plan.t[f'face{d}']) for d in plan.face_dims]
+        adj = ph._make_non_decreasing(torch.cat(fs), tabs)
+        blocks = TP.torch_persistence(adj, plan, 2, True, False, None)
+        cv = corrected(structs, fs)
+        for i, st in enumerate(structs):
+            gf, ge = gudhi_diagrams(st, cv[i], 1)
+            for d in range(2):
+                tf = [(blocks[('fin', d)]['b'][i, r].item(), blocks[('fin', d)]['d'][i, r].item())
+                      for r in np.nonzero(blocks[('fin', d)]['valid'][i].numpy())[0]] if ('fin', d) in blocks else []
+                te = [blocks[('ess', d)]['b'][i, r].item()
+                      for r in np.nonzero(blocks[('ess', d)]['valid'][i].numpy())[0]] if ('ess', d) in blocks else []
+                cnt += 1; bad += not (same(gf[d], tf) and same(ge[d], te))
+    print(f"[7] PROTEINS largest graphs (n up to {nmax}, relaxation H0 path): {cnt - bad}/{cnt} diagrams identical to gudhi")
+    return ok and bad == 0
+
+
 def part5():
     from easydict import EasyDict
     from models.base_model import BaseModel
@@ -295,7 +335,7 @@ def part5():
 
 
 if __name__ == '__main__':
-    parts = [int(a) for a in sys.argv[1:]] or [1, 2, 3, 4, 5, 6]
-    fns = {1: part1, 2: part2, 3: part3, 4: part4, 5: part5, 6: part6}
+    parts = [int(a) for a in sys.argv[1:]] or [1, 2, 3, 4, 5, 6, 7]
+    fns = {1: part1, 2: part2, 3: part3, 4: part4, 5: part5, 6: part6, 7: part7}
     results = [fns[k]() for k in parts]
     print("PASS" if all(results) else "FAIL"); sys.exit(0 if all(results) else 1)

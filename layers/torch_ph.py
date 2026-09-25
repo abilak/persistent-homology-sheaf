@@ -74,6 +74,36 @@ def _minmax_closure(R, rounds, max_elems=1 << 25):
     return R
 
 
+SQUARING_MAX_N = 128      # dense min-max squaring (sync-free) up to this many nodes
+
+
+def _bottleneck_relax(ea, eb, rank_e, emask, N, n, check_every=8):
+    """All-pairs bottleneck edge ranks by relaxation over the edge list (for
+    large sparse graphs, where squaring's O(n^3 log n) is prohibitive):
+    R[v, b] <- min(R[v, b], max(R[v, a], rank(a, b))), both edge directions.
+    O(n m) per step; converges after (longest minimax path in edges) steps;
+    convergence is checked every `check_every` steps (one scalar sync each)."""
+    dev = ea.device
+    INF = float('inf')
+    R = torch.full((N, n, n), INF, device=dev)
+    R.diagonal(dim1=1, dim2=2).fill_(-1.0)          # empty path: below every rank
+    r = torch.where(emask, rank_e.to(R.dtype), torch.full_like(rank_e, INF, dtype=R.dtype))
+    m = ea.shape[1]
+    ia = ea[:, None, :].expand(N, n, m); ib = eb[:, None, :].expand(N, n, m)
+    while True:
+        prev = R
+        for _ in range(check_every):
+            cb = torch.maximum(R.gather(2, ia), r[:, None, :])     # reach b via a
+            ca = torch.maximum(R.gather(2, ib), r[:, None, :])     # reach a via b
+            R = R.scatter_reduce(2, ib, cb, reduce='amin')
+            R = R.scatter_reduce(2, ia, ca, reduce='amin')
+        if bool((R == prev).all()):
+            break
+    R = R.clone()
+    R.diagonal(dim1=1, dim2=2).fill_(INF)
+    return R
+
+
 def _stable_rank(values, valid):
     """rank (N, K) and order (N, K) (order[r] = entry of rank r) under
     (value, index); invalid entries rank last."""
@@ -177,12 +207,15 @@ def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
     blocks = {}
 
     # ---------------- H0 -----------------------------------------------------
-    R = torch.full((N, n, n), INF, device=dev)
-    if m:
-        rv = torch.where(emask, rank_e.to(R.dtype), torch.full_like(ev, INF, dtype=R.dtype))
-        bi = torch.arange(N, device=dev)[:, None].expand(N, m)
-        R.index_put_((bi, ea, eb), rv); R.index_put_((bi, eb, ea), rv)
-        R = _minmax_closure(R, max(1, int(np.ceil(np.log2(max(2, n - 1))))))
+    if m and n > SQUARING_MAX_N:
+        R = _bottleneck_relax(ea, eb, rank_e, emask, N, n)
+    else:
+        R = torch.full((N, n, n), INF, device=dev)
+        if m:
+            rv = torch.where(emask, rank_e.to(R.dtype), torch.full_like(ev, INF, dtype=R.dtype))
+            bi = torch.arange(N, device=dev)[:, None].expand(N, m)
+            R.index_put_((bi, ea, eb), rv); R.index_put_((bi, eb, ea), rv)
+            R = _minmax_closure(R, max(1, int(np.ceil(np.log2(max(2, n - 1))))))
     older = (rank_v[:, None, :] < rank_v[:, :, None]) & vmask[:, None, :]
     dr = torch.where(older, R, torch.full_like(R, INF)).amin(dim=2)          # (N, n)
     fin0 = vmask & torch.isfinite(dr)
