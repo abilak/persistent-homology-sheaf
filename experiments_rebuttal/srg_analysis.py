@@ -1,3 +1,4 @@
+import sys
 """
 Q1: Is the expressivity gain due to persistent homology, or merely to the
 clique complex exposing higher-order clique counts that 3-WL cannot detect?
@@ -56,7 +57,7 @@ def graph_to_input(G):
     deg = np.sqrt(A.sum(0))
     dinv = np.divide(1.0, deg, out=np.zeros_like(deg), where=deg != 0)
     norm = np.diag(dinv) @ A @ np.diag(dinv)  # D^-1/2 A D^-1/2, channel 0
-    x = torch.from_numpy(norm).unsqueeze(0).unsqueeze(0)  # (1,1,n,n)
+    x = torch.from_numpy(norm).unsqueeze(0).unsqueeze(0).to(torch.get_default_dtype())  # (1,1,n,n)
     return x
 
 
@@ -139,4 +140,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if '--float64' in sys.argv:
+        torch.set_default_dtype(torch.float64)
     main()
