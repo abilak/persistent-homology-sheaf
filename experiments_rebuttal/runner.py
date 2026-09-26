@@ -363,6 +363,12 @@ PLANS["ablation_min_fast"] = [
     j for ds in ["MUTAG", "PTC", "NCI1", "NCI109"]
     for j in improve_plan([ds], extra=FAST, tag="_fast")
     if j.get("variant") in ("rev_fast", "ns_ess_fast")]
+# Four filtration heads (full_m4) only, all datasets, smallest first; reuses
+# the baseline runs of core_fast (same result paths as improve_*_fast).
+PLANS["m4_fast"] = [
+    j for ds in ["MUTAG", "PTC", "IMDBBINARY", "PROTEINS", "NCI1", "NCI109"]
+    for j in improve_plan([ds], extra=FAST, tag="_fast")
+    if j.get("variant") == "full_m4_fast"]
 # same-pipeline message-passing baselines (no padding: they do not support it)
 PLANS["mp_baselines"] = list(jobs_for(["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"],
                                       ["mlp", "gcn", "gin", "gsn"], [0], range(1, 11)))
