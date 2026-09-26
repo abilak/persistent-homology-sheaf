@@ -13,9 +13,18 @@ _QUIET_ENV = os.environ.get('QUIET')
 QUIET = (_QUIET_ENV == '1') if _QUIET_ENV is not None else (not os.isatty(1))
 
 
+
+def _host(x):
+    """accumulated metric (device tensor or number) -> float / numpy array,
+    converted once per epoch (one host sync)."""
+    if torch.is_tensor(x):
+        x = x.detach().cpu()
+        return float(x) if x.numel() == 1 else x.numpy()
+    return x
+
 class Trainer(object):
     def __init__(self, model_wrapper, data, config):
-        self.is_QM9 = config.dataset_name == 'QM9'
+        self.is_QM9 = config.dataset_name in ('QM9', 'ZINC')
         self.best_val_loss = np.inf
         self.best_epoch = -1
         self.cur_epoch = 0
@@ -97,8 +106,7 @@ class Trainer(object):
         tt.close()
         self.scheduler.step()
         total_loss = float(total_loss)
-        if torch.is_tensor(total_correct_labels_or_distances):
-            total_correct_labels_or_distances = float(total_correct_labels_or_distances)
+        total_correct_labels_or_distances = _host(total_correct_labels_or_distances)
 
         loss_per_epoch = total_loss/self.data_loader.train_size
         if not self.is_QM9:
@@ -157,8 +165,7 @@ class Trainer(object):
 
         # tt.close()
         total_loss = float(total_loss)
-        if torch.is_tensor(total_correct_or_dist):
-            total_correct_or_dist = float(total_correct_or_dist)
+        total_correct_or_dist = _host(total_correct_or_dist)
 
         val_loss = total_loss/self.data_loader.val_size
         if self.is_QM9:
@@ -204,8 +211,11 @@ class Trainer(object):
                 graph, label = self.data_loader.next_batch()
                 loss, dists = self.model_wrapper.run_model_get_loss_and_results(graph, label)
                 # update metrics returned from train_step func
-                total_loss += loss.cpu().item()
+                total_loss += loss.detach()
                 total_dists += dists
+
+        total_loss = float(total_loss)
+        total_dists = _host(total_dists)
 
         test_loss = total_loss/self.data_loader.test_size
         test_dists = (total_dists*self.data_loader.labels_std) / self.data_loader.test_size

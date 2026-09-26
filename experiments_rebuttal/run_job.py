@@ -26,6 +26,10 @@ ARCH = {
     'NCI109':     dict(block=[64, 64], batch=64),
     'PROTEINS':   dict(block=[64, 64], batch=16),
     'IMDBBINARY': dict(block=[64, 64], batch=32),
+    'IMDBMULTI':  dict(block=[64, 64], batch=32),
+    'ENZYMES':    dict(block=[64, 64], batch=16),
+    # regression (fixed 10k/1k/1k split, MAE); "fold" is unused, "seed" varies
+    'ZINC':       dict(block=[64, 64], batch=64),
 }
 
 
@@ -78,6 +82,9 @@ def run(dataset, model_type, seed, fold, epochs=None, overrides=None):
     best_val, best_ep = -1.0, -1
     val_curve = []
     epoch_times = []
+    if dataset == 'ZINC':
+        return _run_regression(cfg, data, mw, tr, n_params, dataset, model_type,
+                               seed, fold, overrides)
     t_start = time.time()
     for ep in range(cfg.num_epochs):
         t0 = time.time()
@@ -99,6 +106,44 @@ def run(dataset, model_type, seed, fold, epochs=None, overrides=None):
     )
 
 
+def _mae(mw, data, which):
+    """MAE (in target units) over the val or test split, no autograd; one
+    host sync per call."""
+    data.initialize(which)
+    n_it = data.num_iterations_val if which == 'val' else data.num_iterations_test
+    size = data.val_size if which == 'val' else data.test_size
+    mw.eval()
+    tot = None
+    with torch.no_grad():
+        for _ in range(n_it):
+            g, y = data.next_batch()
+            _, d = mw.run_model_get_loss_and_results(g, y)
+            tot = d if tot is None else tot + d
+    return float((tot.sum().cpu() * float(np.asarray(data.labels_std).reshape(-1)[0])) / size)
+
+
+def _run_regression(cfg, data, mw, tr, n_params, dataset, model_type, seed, fold, overrides):
+    """ZINC: train for num_epochs; after every epoch record val and test MAE;
+    report the test MAE at the epoch of lowest val MAE (standard protocol)."""
+    val_curve, test_curve, epoch_times = [], [], []
+    t_start = time.time()
+    for ep in range(cfg.num_epochs):
+        t0 = time.time()
+        tr.train_epoch(ep)
+        epoch_times.append(time.time() - t0)
+        val_curve.append(round(_mae(mw, data, 'val'), 6))
+        test_curve.append(round(_mae(mw, data, 'test'), 6))
+    best = int(np.argmin(val_curve))
+    return dict(
+        dataset=dataset, model=model_type, seed=int(seed), fold=int(fold),
+        epochs=cfg.num_epochs, n_params=int(n_params), task='regression',
+        best_val_mae=val_curve[best], test_mae_at_best_val=test_curve[best], best_epoch=best,
+        sec_per_train_epoch=round(float(np.mean(epoch_times)), 4),
+        total_sec=round(time.time() - t_start, 1),
+        val_curve=val_curve, test_curve=test_curve, overrides=overrides or {},
+    )
+
+
 if __name__ == '__main__':
     dataset, model_type = sys.argv[1], sys.argv[2]
     seed, fold = int(sys.argv[3]), int(sys.argv[4])
@@ -113,6 +158,11 @@ if __name__ == '__main__':
     with open(tmp, 'w') as f:
         json.dump(res, f)
     os.replace(tmp, out)
+    if res.get('task') == 'regression':
+        print(f"DONE {dataset}/{model_type}/seed{seed} best_val_MAE={res['best_val_mae']:.4f} "
+              f"test_MAE={res['test_mae_at_best_val']:.4f}@{res['best_epoch']} "
+              f"{res['sec_per_train_epoch']:.2f}s/ep total={res['total_sec']:.0f}s")
+        sys.exit(0)
     print(f"DONE {dataset}/{model_type}/seed{seed}/fold{fold} "
           f"best_val={res['best_val_acc']:.4f}@{res['best_epoch']} "
           f"{res['sec_per_train_epoch']:.2f}s/ep total={res['total_sec']:.0f}s")

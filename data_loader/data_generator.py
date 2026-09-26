@@ -12,7 +12,8 @@ class DataGenerator:
         self.config = config
         # load data here
         self.batch_size = self.config.hyperparams.batch_size
-        self.is_qm9 = self.config.dataset_name == 'QM9'
+        # regression datasets (fixed train/val/test split, MAE): QM9 and ZINC
+        self.is_qm9 = self.config.dataset_name in ('QM9', 'ZINC')
         self.labels_dtype = torch.float32 if self.is_qm9 else torch.long
         # padded_batching: batch graphs of SIMILAR size (sorted, consecutive)
         # padded to the batch max with a node mask, instead of only graphs of
@@ -24,12 +25,25 @@ class DataGenerator:
 
     # load the specified dataset in the config to the data_generator instance
     def load_data(self):
-        if self.is_qm9:
+        if self.config.dataset_name == 'ZINC':
+            self.load_zinc_data()
+        elif self.is_qm9:
             self.load_qm9_data()
         else:
             self.load_data_benchmark()
 
         self.split_val_test_to_batches()
+
+    # load ZINC-12k (standard split); targets normalized by train mean / std,
+    # reported MAE is multiplied back by labels_std (same as QM9)
+    def load_zinc_data(self):
+        tr_g, tr_y, va_g, va_y, te_g, te_y = helper.load_zinc()
+        mean, std = tr_y.mean(axis=0), tr_y.std(axis=0)
+        self.train_graphs, self.train_labels = tr_g, (tr_y - mean) / std
+        self.val_graphs, self.val_labels = va_g, (va_y - mean) / std
+        self.test_graphs, self.test_labels = te_g, (te_y - mean) / std
+        self.train_size, self.val_size, self.test_size = len(tr_g), len(va_g), len(te_g)
+        self.labels_std = std
 
     # load QM9 data set
     def load_qm9_data(self):
@@ -110,7 +124,10 @@ class DataGenerator:
             else:
                 self.iter = zip(self.val_graphs_batches, self.val_labels_batches)
         elif what_set == 'test':
-            self.iter = zip(self.test_graphs_batches, self.test_labels_batches)
+            if self.padded:
+                self.iter = iter(self._test_padded)
+            else:
+                self.iter = zip(self.test_graphs_batches, self.test_labels_batches)
         else:
             raise ValueError("what_set should be either 'train', 'val' or 'test'")
 
@@ -203,7 +220,7 @@ class DataGenerator:
         graphs, labels = helper.split_to_batches(graphs, labels, self.batch_size)
         self.num_iterations_val = len(graphs)
         self.val_graphs_batches, self.val_labels_batches = graphs, labels
-        if self.padded and not self.is_qm9:
+        if self.padded:
             self._val_padded = self._padded_batches(self.val_graphs, self.val_labels, False)
             self.num_iterations_val = len(self._val_padded)
 
@@ -213,6 +230,9 @@ class DataGenerator:
             graphs, labels = helper.split_to_batches(graphs, labels, self.batch_size)
             self.num_iterations_test = len(graphs)
             self.test_graphs_batches, self.test_labels_batches = graphs, labels
+            if self.padded:
+                self._test_padded = self._padded_batches(self.test_graphs, self.test_labels, False)
+                self.num_iterations_test = len(self._test_padded)
 
 
 if __name__ == '__main__':

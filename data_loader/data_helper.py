@@ -4,7 +4,7 @@ import pickle
 
 
 NUM_LABELS = {'ENZYMES': 3, 'COLLAB': 0, 'IMDBBINARY': 0, 'IMDBMULTI': 0, 'MUTAG': 7, 'NCI1': 37, 'NCI109': 38,
-              'PROTEINS': 3, 'PTC': 22, 'DD': 89}
+              'PROTEINS': 3, 'PTC': 22, 'DD': 89, 'ZINC': 32}
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -131,6 +131,43 @@ def get_parameter_split(ds_name):
         for line in file:
             test_idx.append(int(line.rstrip()))
     return train_idx, test_idx
+
+
+ZINC_ATOM_TYPES = 28     # ZINC node labels are 0..27
+ZINC_BOND_TYPES = 4      # bond types 1..3 (single/double/triple), 4 slots
+
+
+def load_zinc():
+    """ZINC-12k (subset=True): standard 10k/1k/1k train/val/test split, prepared
+    by scripts/prepare_zinc.py. Returns (train_graphs, train_labels, val_graphs,
+    val_labels, test_graphs, test_labels); graphs are CHW float32 arrays with
+    channel 0 = adjacency, 1..28 = one-hot atom type on the diagonal, 29..32 =
+    one-hot bond type on the edge entries; labels are (N, 1) float32."""
+    out = []
+    for split in ('train', 'val', 'test'):
+        out += list(load_zinc_aux(split))
+    return tuple(out)
+
+
+def load_zinc_aux(which_set):
+    path = BASE_DIR + "/data/ZINC/ZINC_{}.p".format(which_set)
+    with open(path, 'rb') as f:
+        data = pickle.load(f)
+    C = 1 + ZINC_ATOM_TYPES + ZINC_BOND_TYPES
+    graphs = np.empty(len(data), dtype=object)
+    labels = np.zeros((len(data), 1), dtype=np.float32)
+    for i, g in enumerate(data):
+        n = len(g['atoms'])
+        x = np.zeros((C, n, n), dtype=np.float32)
+        src, dst = g['edge_index']
+        x[0, src, dst] = 1.0
+        x[1 + np.asarray(g['atoms']), np.arange(n), np.arange(n)] = 1.0
+        bonds = np.asarray(g['bonds'])
+        ok = (bonds >= 1) & (bonds <= ZINC_BOND_TYPES)
+        x[1 + ZINC_ATOM_TYPES + bonds[ok] - 1, np.asarray(src)[ok], np.asarray(dst)[ok]] = 1.0
+        graphs[i] = x
+        labels[i, 0] = g['y']
+    return graphs, labels
 
 
 def group_same_size(graphs, labels):

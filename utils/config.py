@@ -6,11 +6,11 @@ import datetime
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 EXPERIMENTS_ROOT = os.path.join(PROJECT_ROOT, "experiments")
 
-NUM_LABELS = {'COLLAB':0, 'IMDBBINARY':0, 'IMDBMULTI':0, 'MUTAG':7, 'NCI1':37, 'NCI109':38, 'PROTEINS':3, 'PTC':22, 'DD':89, 'QM9': 18}
-NUM_CLASSES = {'COLLAB':3, 'IMDBBINARY':2, 'IMDBMULTI':3, 'MUTAG':2, 'NCI1':2, 'NCI109':2, 'PROTEINS':2, 'PTC':2, 'DD':2, 'QM9': 12}
-LEARNING_RATES = {'COLLAB': 0.0001, 'IMDBBINARY': 0.00005, 'IMDBMULTI': 0.0001, 'MUTAG': 0.0005, 'NCI1':0.0001, 'NCI109':0.0001, 'PROTEINS': 0.001, 'PTC': 0.0001, 'DD': 0.0001}
-DECAY_RATES = {'COLLAB': 0.5, 'IMDBBINARY': 0.5, 'IMDBMULTI': 0.75, 'MUTAG': 0.5, 'NCI1':0.75, 'NCI109':0.75, 'PROTEINS': 0.5, 'PTC': 1.0, 'DD': 0.5}
-CHOSEN_EPOCH = {'COLLAB': 150, 'IMDBBINARY': 100, 'IMDBMULTI': 150, 'MUTAG': 200, 'NCI1': 200, 'NCI109': 250, 'PROTEINS': 100, 'PTC': 180, 'DD': 150}
+NUM_LABELS = {'COLLAB':0, 'IMDBBINARY':0, 'IMDBMULTI':0, 'MUTAG':7, 'NCI1':37, 'NCI109':38, 'PROTEINS':3, 'PTC':22, 'DD':89, 'QM9': 18, 'ENZYMES': 3, 'ZINC': 32}
+NUM_CLASSES = {'COLLAB':3, 'IMDBBINARY':2, 'IMDBMULTI':3, 'MUTAG':2, 'NCI1':2, 'NCI109':2, 'PROTEINS':2, 'PTC':2, 'DD':2, 'QM9': 12, 'ENZYMES': 6, 'ZINC': 1}
+LEARNING_RATES = {'COLLAB': 0.0001, 'IMDBBINARY': 0.00005, 'IMDBMULTI': 0.0001, 'MUTAG': 0.0005, 'NCI1':0.0001, 'NCI109':0.0001, 'PROTEINS': 0.001, 'PTC': 0.0001, 'DD': 0.0001, 'ENZYMES': 0.001, 'ZINC': 0.001}
+DECAY_RATES = {'COLLAB': 0.5, 'IMDBBINARY': 0.5, 'IMDBMULTI': 0.75, 'MUTAG': 0.5, 'NCI1':0.75, 'NCI109':0.75, 'PROTEINS': 0.5, 'PTC': 1.0, 'DD': 0.5, 'ENZYMES': 0.5, 'ZINC': 0.75}
+CHOSEN_EPOCH = {'COLLAB': 150, 'IMDBBINARY': 100, 'IMDBMULTI': 150, 'MUTAG': 200, 'NCI1': 200, 'NCI109': 250, 'PROTEINS': 100, 'PTC': 180, 'DD': 150, 'ENZYMES': 100, 'ZINC': 300}
 TIME = '{:%Y_%m_%d_%H_%M_%S}'.format(datetime.datetime.now())
 
 
@@ -35,7 +35,7 @@ def process_config(json_file, dataset_name, use_topology=None):
     if dataset_name != '':
         config.dataset_name = dataset_name
     config.num_classes = NUM_CLASSES[config.dataset_name]
-    if config.dataset_name == 'QM9' and config.target_param is not False:
+    if config.dataset_name == 'QM9' and getattr(config, 'target_param', False) is not False:
         config.num_classes = 1
     config.node_labels = NUM_LABELS[config.dataset_name]
     config.timestamp = TIME

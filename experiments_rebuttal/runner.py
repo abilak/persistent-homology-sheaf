@@ -369,6 +369,31 @@ PLANS["m4_fast"] = [
     j for ds in ["MUTAG", "PTC", "IMDBBINARY", "PROTEINS", "NCI1", "NCI109"]
     for j in improve_plan([ds], extra=FAST, tag="_fast")
     if j.get("variant") == "full_m4_fast"]
+# Additional datasets.
+#   IMDB-MULTI, ENZYMES: 10-fold TU protocol, baseline vs full model.
+#   ZINC-12k: regression on the fixed 10k/1k/1k split, 4 seeds (fold unused),
+#   test MAE at the best-validation epoch; baseline vs full, plus the two
+#   ablation variants (ZINC is molecular, so the ablation is informative).
+PLANS["extra_tu_fast"] = [
+    j for ds in ["IMDBMULTI", "ENZYMES"]
+    for j in improve_plan([ds], extra=FAST, tag="_fast")
+    if j["model"] == "baseline" or j.get("variant") == "full_fast"]
+
+
+def zinc_plan(variants, seeds=(0, 1, 2, 3), with_baseline=True):
+    jobs = []
+    if with_baseline:
+        jobs += [dict(dataset="ZINC", model="baseline", seed=sd, fold=1, epochs=None,
+                      variant="fast", overrides=dict(FAST)) for sd in seeds]
+    V = dict(IMPROVE_VARIANTS)
+    jobs += [dict(dataset="ZINC", model="topo", seed=sd, fold=1, epochs=None,
+                  variant=vn + "_fast", overrides=dict(V[vn], **FAST))
+             for vn in variants for sd in seeds]
+    return jobs
+
+
+PLANS["zinc_fast"] = zinc_plan(["full"])
+PLANS["zinc_ablation_fast"] = zinc_plan(["rev", "ns_ess"], with_baseline=False)
 # same-pipeline message-passing baselines (no padding: they do not support it)
 PLANS["mp_baselines"] = list(jobs_for(["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"],
                                       ["mlp", "gcn", "gin", "gsn"], [0], range(1, 11)))

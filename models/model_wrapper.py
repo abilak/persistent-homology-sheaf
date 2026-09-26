@@ -52,11 +52,12 @@ class ModelWrapper(object):
         :return: tuple of (loss tensor, dists numpy array) for QM9
                           (loss tensor, number of correct predictions) for classification graphs
         """
-        if self.config.dataset_name == 'QM9':
+        if self.config.dataset_name in ('QM9', 'ZINC'):
             differences = (scores-labels).abs().sum(dim=0)
             loss = differences.sum()
-            dists = differences.detach().cpu().numpy()
-            return loss, dists
+            # summed absolute error per target, kept ON device (callers
+            # accumulate and convert once per epoch; see trainer._host)
+            return loss, differences.detach()
         else:
             loss = F.cross_entropy(scores, labels, reduction='sum')
             # kept ON DEVICE: callers accumulate and read it once per epoch
