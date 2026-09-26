@@ -497,7 +497,7 @@ class LearnedFiltration(nn.Module):
         if plan is not None and plan.same_M and plan.S_tot and plan.M == M:
             pf = pair_features.permute(0, 2, 3, 1).reshape(B * M * M, d)
             sums = torch.zeros(plan.S_tot, d, device=device, dtype=pf.dtype)
-            sums = sums.index_add(0, plan.t['f_seg'], pf[plan.t['f_flat']])
+            sums = sums.index_add(0, plan.t['f_seg'], pf.index_select(0, plan.t['f_flat']))
             vals = self.mlp(sums / plan.f_counts.to(pf.dtype).unsqueeze(-1)).squeeze(-1)
             if self.squash:
                 vals = torch.tanh(vals)
@@ -531,7 +531,7 @@ class LearnedFiltration(nn.Module):
         counts = torch.cat(cnt_list)
 
         pf = pair_features.permute(0, 2, 3, 1).reshape(B * M * M, d)
-        pair_vals = pf[flat_idx]                                   # (P_tot, d)
+        pair_vals = pf.index_select(0, flat_idx)                   # (P_tot, d)
         sums = torch.zeros(seg_off, d, device=device, dtype=pair_vals.dtype)
         sums = sums.index_add(0, seg_idx, pair_vals)
         means = sums / counts.unsqueeze(-1)
@@ -560,7 +560,7 @@ class LearnedFiltration(nn.Module):
                 continue
             f_flat, f_seg, f_counts, _ = st.on(device)
             pf = pair_features[b].permute(1, 2, 0).reshape(st.M * st.M, d)
-            pair_vals = pf[f_flat]
+            pair_vals = pf.index_select(0, f_flat)
             sums = torch.zeros(st.S, d, device=device, dtype=pair_vals.dtype)
             sums = sums.index_add(0, f_seg, pair_vals)
             vals = self.mlp(sums / f_counts.unsqueeze(-1)).squeeze(-1)

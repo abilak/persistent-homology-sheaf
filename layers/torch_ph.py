@@ -57,6 +57,13 @@ CHECK_EVERY = 4           # otherwise check convergence every CHECK_EVERY steps
 _CONST = {}
 
 
+def take(x, idx):
+    """x[idx] for a long index tensor along dim 0, via index_select: its
+    backward is an atomic index_add, while advanced indexing's backward runs
+    the sort-based deterministic kernel (several times slower on CUDA)."""
+    return x.index_select(0, idx.reshape(-1)).reshape(*idx.shape, *x.shape[1:])
+
+
 def _const(name, device, fn):
     k = (name, str(device))
     if k not in _CONST:
@@ -183,38 +190,71 @@ def _last_nonzero(M):
 
 
 def _reduce_sparse(Mc, p, inv):
-    """The parallel reduction of _reduce_parallel with sparse steps: every
-    colliding column c (low shared with an earlier column) is reduced by the
-    leftmost column holding that low, exactly as in the dense step, but only
-    the colliding columns are gathered, updated and scattered back, and only
-    their lows recomputed: O(N K + C R) per step instead of several O(N K R)
-    passes. Pivots never collide in the step they are used (they are the
-    leftmost holders of their low), so the updates are conflict-free and the
-    result equals the dense reduction's."""
+    """The parallel reduction of _reduce_parallel with sparse rounds: each
+    colliding column (low shared with an earlier column) is reduced by the
+    leftmost column holding that low, as in the dense step, but only colliding
+    columns are gathered, updated and scattered back, and only their lows
+    recomputed: O(N K + C R) per round instead of several O(N K R) passes.
+
+    Rounds need no host sync: each processes up to `cap` colliding columns
+    (the first `cap` in column order; cap = the number colliding in the first
+    round, the largest in practice), and convergence is checked once every
+    CHECK_EVERY rounds. Processing a subset of the colliding columns is still
+    a valid reduction: pivots are the leftmost holders of their low, so they
+    never collide and are never modified in the round they are used, and only
+    earlier columns are added to later ones. The pairing (the lows of the
+    reduced matrix) is unique, so it equals the dense reduction's exactly."""
     N, K, R = Mc.shape
     dev = Mc.device
-    M = Mc.reshape(N * K, R)
-    low = _last_nonzero(M).reshape(N, K)
+    NK = N * K
+    # row NK is a zero sentinel: unused capacity slots point at it (no-ops)
+    M = torch.cat([Mc.reshape(NK, R), torch.zeros(1, R, dtype=Mc.dtype, device=dev)], 0)
+    low = torch.cat([_last_nonzero(M[:NK]), torch.full((1,), -1, dtype=torch.long, device=dev)])
     colidx = torch.arange(K, device=dev)[None, :].expand(N, K)
     base = (torch.arange(N, device=dev) * K)[:, None]
-    while True:
-        # leftmost column holding each low (slot 0 collects the zero columns)
+    flat_ids = torch.arange(NK, device=dev)
+
+    def collisions():
+        lo = low[:NK].reshape(N, K)
         first = torch.full((N, R + 1), K, dtype=torch.long, device=dev)
-        first.scatter_reduce_(1, low + 1, colidx, reduce='amin')
-        piv = first.gather(1, low + 1)
-        coll = (low >= 0) & (piv < colidx)
-        idx = coll.reshape(-1).nonzero().squeeze(1)          # one sync per step
-        if idx.numel() == 0:
-            break
-        pidx = (base + piv).reshape(-1)[idx]
+        first.scatter_reduce_(1, lo + 1, colidx, reduce='amin')
+        piv = first.gather(1, lo + 1)
+        return ((lo >= 0) & (piv < colidx)).reshape(-1), (base + piv).reshape(-1)
+
+    def update(idx, pidx):
         col, pcol = M[idx], M[pidx]                          # (C, R)
-        L = low.reshape(-1)[idx]
+        L = low[idx].clamp(min=0)
         ar = torch.arange(idx.numel(), device=dev)
         f = ((col[ar, L].long() * inv[pcol[ar, L].long()]) % p).to(M.dtype)
         new = torch.remainder(col - f[:, None] * pcol, p)
-        M[idx] = new
-        low.view(-1)[idx] = _last_nonzero(new)
-    return low, M.reshape(N, K, R)
+        M[idx] = new                                         # conflict-free
+        low[idx] = _last_nonzero(new)
+        low[NK] = -1                                         # sentinel stays zero
+
+    coll, pflat = collisions()
+    idx = coll.nonzero().squeeze(1)                          # one sync: capacity
+    cap = idx.numel()
+    if cap == 0:
+        return low[:NK].reshape(N, K), M[:NK].reshape(N, K, R)
+    update(idx, pflat[idx])
+    slots = torch.arange(cap, device=dev)
+    while True:
+        for _ in range(CHECK_EVERY):
+            coll, pflat = collisions()
+            # first `cap` colliding columns, without a sync: rank of each
+            # colliding column among the colliding ones -> its slot
+            pos = torch.cumsum(coll.long(), 0) - 1
+            tgt = torch.where(coll & (pos < cap), pos, torch.full_like(pos, cap))
+            sel = torch.full((cap + 1,), NK, dtype=torch.long, device=dev)
+            sel.scatter_(0, tgt, flat_ids)                   # slot cap = junk
+            sel = sel[:cap]
+            valid = slots < coll.sum()
+            sel = torch.where(valid, sel, torch.full_like(sel, NK))
+            psel = torch.where(valid, pflat[sel.clamp(max=NK - 1)], torch.full_like(sel, NK))
+            update(sel, psel)
+        if not bool(collisions()[0].any()):                  # one sync per CHECK_EVERY
+            break
+    return low[:NK].reshape(N, K), M[:NK].reshape(N, K, R)
 
 
 def _reduce_chunked(build, N, K, R, p, k_bound, max_elems):
@@ -257,7 +297,7 @@ def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
     INF = float('inf')
     vg, vmask = tp['vg'], tp['vmask']
     eg, emask, ea, eb = tp['eg'], tp['emask'], tp['ea'], tp['eb']
-    vv = adj[vg]; ev = adj[eg]
+    vv = take(adj, vg); ev = take(adj, eg)
     rank_v, _ = _stable_rank(vv, vmask)
     rank_e, order_e = _stable_rank(ev, emask)
     blocks = {}
@@ -295,7 +335,7 @@ def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
     if P1 > 1 and m:
         if T:
             tg, tmask, te = tp['tg'], tp['tmask'], tp['te']
-            tv = adj[tg]
+            tv = take(adj, tg)
             rank_t, order_t = _stable_rank(tv, tmask)
             sign3 = _const(f's3_{p}', dev, lambda: torch.tensor([1, p - 1, 1]))
             # clearing: columns of negative (spanning-forest) edges
@@ -322,13 +362,13 @@ def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
     # ---------------- H2 (cohomology over triangles x tetrahedra) -----------
     if P1 > 2 and T:
         tg, tmask = tp['tg'], tp['tmask']
-        tv = adj[tg]
+        tv = take(adj, tg)
         rank_t, order_t = _stable_rank(tv, tmask)
         pos_t = tmask & ~(tri_paired if tri_paired is not None
                           else torch.zeros_like(tmask))
         if Qn:
             qg, qmask, qf = tp['qg'], tp['qmask'], tp['qf']
-            qv = adj[qg]
+            qv = take(adj, qg)
             rank_q, order_q = _stable_rank(qv, qmask)
             sign4 = _const(f's4_{p}', dev, lambda: torch.tensor([1, p - 1, 1, p - 1]))
             col_pos = pos_t.gather(1, order_t.flip(1))

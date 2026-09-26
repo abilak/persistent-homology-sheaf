@@ -33,10 +33,20 @@ def sync():
         torch.cuda.synchronize()
 
 
+MODE = {"timer": False}
+TIMES = {}
+
+
 def label(owner, name, tag):
+    """profiler range, or (MODE timer) synchronized wall-clock accumulation"""
     f = getattr(owner, name)
     @functools.wraps(f)
     def g(*a, **k):
+        if MODE["timer"]:
+            sync(); t = time.perf_counter()
+            out = f(*a, **k)
+            sync(); TIMES[tag] = TIMES.get(tag, 0.0) + time.perf_counter() - t
+            return out
         with record_function(tag):
             return f(*a, **k)
     setattr(owner, name, g)
@@ -107,3 +117,31 @@ syncs = [e for e in ka if any(s in e.key for s in ("Synchronize", "item", "_loca
 print("\nhost<->device sync / copy ops:")
 for e in sorted(syncs, key=lambda e: -e.count)[:8]:
     print(f"  {e.key:<40}{e.count:>7} calls {ms(e.cpu_time_total)} ms CPU")
+
+
+# ---- synchronized wall-clock per component (inclusive), topo vs baseline ----
+def timed_steps(model_type):
+    torch.manual_seed(0); np.random.seed(0)
+    c = run_job.build_config(DS, model_type, job["overrides"] if model_type == "topo"
+                             else {"padded_batching": True}); c.num_fold = 1
+    dd = DataGenerator(c); w = ModelWrapper(c, dd); t_ = Trainer(w, dd, c)
+    t_.train_epoch(0)                                # warm: complexes cached
+    dd.initialize("train")
+    n = min(STEPS, dd.num_iterations_train)
+    TIMES.clear(); MODE["timer"] = True
+    for _ in range(n):
+        sync(); t0 = time.perf_counter(); g, y = dd.next_batch(); sync(); t1 = time.perf_counter()
+        t_.optimizer.zero_grad(set_to_none=True)
+        loss = loss_fn(w.model(g), y); sync(); t2 = time.perf_counter()
+        loss.backward(); sync(); t3 = time.perf_counter()
+        t_.optimizer.step(); sync(); t4 = time.perf_counter()
+        for k, v in (("data", t1 - t0), ("forward", t2 - t1), ("backward", t3 - t2), ("optimizer", t4 - t3), ("step total", t4 - t0)):
+            TIMES[k] = TIMES.get(k, 0.0) + v
+    MODE["timer"] = False
+    return {k: v / n * 1e3 for k, v in TIMES.items()}
+
+print("\nsynchronized wall-clock per step (ms; inclusive, nested components are part of forward):")
+tb, tt = timed_steps("baseline"), timed_steps("topo")
+print(f"{'':<16}{'baseline':>10}{'full model':>12}")
+for k in ["data", "forward", "backward", "optimizer", "step total"] + [t for t in TAGS if t in tt and t != "#model_forward"]:
+    print(f"{k:<16}{tb.get(k, 0):>10.1f}{tt.get(k, 0):>12.1f}")
