@@ -13,7 +13,7 @@ from collections import defaultdict
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from aggregate import boot_ci, perm_p, wilcoxon_p
+from aggregate import boot_ci, perm_p, wilcoxon_p, stable_seed
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS = os.path.join(ROOT, "rebuttal_results")
@@ -74,7 +74,7 @@ for ds in ("MUTAG", "PTC"):
         if m not in means:
             continue
         d = (means[m] - base) * 100
-        lo, hi = boot_ci(d, seed=abs(hash((ds, m))) % 2**31)
+        lo, hi = boot_ci(d, seed=stable_seed(ds, m))
         print(f"{m + ' - baseline':<20}{d.mean():+7.2f}       "
               f"[{lo:+.2f}, {hi:+.2f}]     "
               f"{perm_p(d):<10.4f}{wilcoxon_p(d):.4f}")

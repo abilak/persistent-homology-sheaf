@@ -10,7 +10,7 @@ from collections import defaultdict
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from aggregate import per_fold_scores, boot_ci, perm_p, wilcoxon_p
+from aggregate import per_fold_scores, boot_ci, perm_p, wilcoxon_p, stable_seed
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS = os.path.join(ROOT, "rebuttal_results")
@@ -53,6 +53,6 @@ for (m, v), runs in sorted(pools.items()):
         print(f"{v or '(main)':<18}incomplete ({0 if st is None else len(st)} folds)")
         continue
     d = (st - sb) * 100
-    lo, hi = boot_ci(d, seed=abs(hash(v)) % 2**31)
+    lo, hi = boot_ci(d, seed=stable_seed(v))
     print(f"{v or '(main)':<18}{st.mean()*100:6.2f} +/- {st.std(ddof=1)*100:<8.2f}"
           f"{d.mean():+6.2f}  [{lo:+.2f},{hi:+.2f}]   {perm_p(d):.4f}")

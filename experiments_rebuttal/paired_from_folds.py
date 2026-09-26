@@ -21,7 +21,7 @@ import os, sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from aggregate import boot_ci, perm_p, wilcoxon_p
+from aggregate import boot_ci, perm_p, wilcoxon_p, stable_seed
 
 # Optionally hard-code your numbers here instead of passing them on the CLI.
 # Values are PER-FOLD accuracies (already averaged over seeds), in percent.
@@ -42,7 +42,7 @@ def report(name, base, topo):
         return
     d = topo - base
     n = len(d)
-    lo, hi = boot_ci(d, seed=abs(hash(name)) % 2**31)
+    lo, hi = boot_ci(d, seed=stable_seed(name))
     pp, pw = perm_p(d), wilcoxon_p(d)
     dz = d.mean() / d.std(ddof=1) if d.std(ddof=1) > 0 else float('inf')
     w, l, t = int((d > 0).sum()), int((d < 0).sum()), int((d == 0).sum())

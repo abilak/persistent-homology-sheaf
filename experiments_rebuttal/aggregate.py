@@ -107,6 +107,13 @@ def per_fold_scores(runs, xu=True):
 
 
 # ------------------------------ statistics -------------------------------- #
+def stable_seed(*key):
+    """Deterministic seed from a key. (Python's hash() of a str is salted per
+    process, so seeding with it gave a different bootstrap draw every run.)"""
+    import zlib
+    return zlib.crc32(repr(key).encode())
+
+
 def boot_ci(x, nb=20000, alpha=0.05, seed=0):
     rng = np.random.default_rng(seed)          # per-call RNG => reproducible
     x = np.asarray(x, float)
@@ -194,7 +201,7 @@ def main():
             mx, _ = per_fold_scores(runs, xu=False)
             if xu is None:
                 continue
-            lo, hi = boot_ci(xu * 100, seed=abs(hash((ds, m))) % 2**31)
+            lo, hi = boot_ci(xu * 100, seed=stable_seed(ds, m))
             summary[f"{ds}/{m}"] = dict(xu_mean=float(xu.mean() * 100),
                                         xu_std=float(xu.std(ddof=1) * 100),
                                         maxep_mean=float(mx.mean() * 100),
@@ -231,7 +238,7 @@ def main():
             if sb is None or st is None or len(sb) != len(st):
                 continue
             d = (st - sb) * 100
-            lo, hi = boot_ci(d, seed=abs(hash((ds, tag))) % 2**31)
+            lo, hi = boot_ci(d, seed=stable_seed(ds, tag))
             pp, pw = perm_p(d), wilcoxon_p(d)
             w = int(np.sum(d > 0)); l = int(np.sum(d < 0)); tie = int(np.sum(d == 0))
             print(f"\n{ds}{tag_display}  [{tag}]  n={len(d)} folds")
