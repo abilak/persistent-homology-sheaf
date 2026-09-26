@@ -355,6 +355,10 @@ PLANS["core_fast"] = [
     j for ds in ["MUTAG", "PTC", "IMDBBINARY", "PROTEINS", "NCI1", "NCI109"]
     for j in improve_plan([ds], extra=FAST, tag="_fast")
     if j["model"] == "baseline" or j.get("variant") == "full_fast"]
+# the same jobs one dataset at a time (core_fast_proteins, ...), so a
+# memory-heavy dataset can run with fewer workers. Same result paths.
+for _ds in ["MUTAG", "PTC", "IMDBBINARY", "PROTEINS", "NCI1", "NCI109"]:
+    PLANS["core_fast_" + _ds.lower()] = [j for j in PLANS["core_fast"] if j["dataset"] == _ds]
 # Minimal ablation for the paper (molecular datasets): the rebuttal model
 # ("rev") and invertible norm + essential classes only ("ns_ess"). Together
 # with core_fast this gives baseline / rev / ns_ess / full. Same result
