@@ -30,6 +30,8 @@ ARCH = {
     'ENZYMES':    dict(block=[64, 64], batch=16),
     # regression (fixed 10k/1k/1k split, MAE); "fold" is unused, "seed" varies
     'ZINC':       dict(block=[64, 64], batch=64),
+    # ogbg-molhiv: fixed OGB scaffold split, ROC-AUC; "fold" unused
+    'MOLHIV':     dict(block=[64, 64], batch=64),
 }
 
 
@@ -85,6 +87,9 @@ def run(dataset, model_type, seed, fold, epochs=None, overrides=None):
     if dataset == 'ZINC':
         return _run_regression(cfg, data, mw, tr, n_params, dataset, model_type,
                                seed, fold, overrides)
+    if dataset == 'MOLHIV':
+        return _run_auc(cfg, data, mw, tr, n_params, dataset, model_type,
+                        seed, fold, overrides)
     t_start = time.time()
     for ep in range(cfg.num_epochs):
         t0 = time.time()
@@ -144,6 +149,50 @@ def _run_regression(cfg, data, mw, tr, n_params, dataset, model_type, seed, fold
     )
 
 
+def roc_auc(y, score):
+    """ROC-AUC via the Mann-Whitney U statistic (average ranks for ties);
+    equals sklearn.metrics.roc_auc_score."""
+    from scipy.stats import rankdata
+    y = np.asarray(y).astype(bool); r = rankdata(score)
+    npos, nneg = y.sum(), (~y).sum()
+    return float((r[y].sum() - npos * (npos + 1) / 2) / (npos * nneg))
+
+
+def _auc(mw, data, which):
+    data.initialize(which)
+    n_it = data.num_iterations_val if which == 'val' else data.num_iterations_test
+    mw.eval()
+    ys, ps = [], []
+    with torch.no_grad():
+        for _ in range(n_it):
+            g, y = data.next_batch()
+            ps.append(torch.softmax(mw.model(g), dim=1)[:, 1])
+            ys.append(y)
+    return roc_auc(torch.cat(ys).cpu().numpy(), torch.cat(ps).cpu().numpy())
+
+
+def _run_auc(cfg, data, mw, tr, n_params, dataset, model_type, seed, fold, overrides):
+    """ogbg-molhiv: after every epoch record val and test ROC-AUC; report the
+    test ROC-AUC at the epoch of highest val ROC-AUC (OGB protocol)."""
+    val_curve, test_curve, epoch_times = [], [], []
+    t_start = time.time()
+    for ep in range(cfg.num_epochs):
+        t0 = time.time()
+        tr.train_epoch(ep)
+        epoch_times.append(time.time() - t0)
+        val_curve.append(round(_auc(mw, data, 'val'), 6))
+        test_curve.append(round(_auc(mw, data, 'test'), 6))
+    best = int(np.argmax(val_curve))
+    return dict(
+        dataset=dataset, model=model_type, seed=int(seed), fold=int(fold),
+        epochs=cfg.num_epochs, n_params=int(n_params), task='auc',
+        best_val_auc=val_curve[best], test_auc_at_best_val=test_curve[best], best_epoch=best,
+        sec_per_train_epoch=round(float(np.mean(epoch_times)), 4),
+        total_sec=round(time.time() - t_start, 1),
+        val_curve=val_curve, test_curve=test_curve, overrides=overrides or {},
+    )
+
+
 if __name__ == '__main__':
     dataset, model_type = sys.argv[1], sys.argv[2]
     seed, fold = int(sys.argv[3]), int(sys.argv[4])
@@ -158,6 +207,11 @@ if __name__ == '__main__':
     with open(tmp, 'w') as f:
         json.dump(res, f)
     os.replace(tmp, out)
+    if res.get('task') == 'auc':
+        print(f"DONE {dataset}/{model_type}/seed{seed} best_val_AUC={res['best_val_auc']:.4f} "
+              f"test_AUC={res['test_auc_at_best_val']:.4f}@{res['best_epoch']} "
+              f"{res['sec_per_train_epoch']:.2f}s/ep total={res['total_sec']:.0f}s")
+        sys.exit(0)
     if res.get('task') == 'regression':
         print(f"DONE {dataset}/{model_type}/seed{seed} best_val_MAE={res['best_val_mae']:.4f} "
               f"test_MAE={res['test_mae_at_best_val']:.4f}@{res['best_epoch']} "

@@ -4,7 +4,7 @@ import pickle
 
 
 NUM_LABELS = {'ENZYMES': 3, 'COLLAB': 0, 'IMDBBINARY': 0, 'IMDBMULTI': 0, 'MUTAG': 7, 'NCI1': 37, 'NCI109': 38,
-              'PROTEINS': 3, 'PTC': 22, 'DD': 89, 'ZINC': 32}
+              'PROTEINS': 3, 'PTC': 22, 'DD': 89, 'ZINC': 32, 'MOLHIV': 98}
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -168,6 +168,52 @@ def load_zinc_aux(which_set):
         graphs[i] = x
         labels[i, 0] = g['y']
     return graphs, labels
+
+
+class CompactGraph:
+    """A graph stored sparsely and densified on demand: .shape is (C, n, n)
+    like a dense graph array, .dense() builds the (C, n, n) float32 tensor.
+    Used for ogbg-molhiv, whose one-hot features would need ~18 GB densely."""
+    __slots__ = ("n", "C", "src", "dst", "atom_ch", "bond_ch")
+    dtype = np.float32
+
+    def __init__(self, n, C, src, dst, atom_ch, bond_ch):
+        self.n, self.C = n, C
+        self.src, self.dst, self.atom_ch, self.bond_ch = src, dst, atom_ch, bond_ch
+
+    @property
+    def shape(self):
+        return (self.C, self.n, self.n)
+
+    def dense(self):
+        x = np.zeros((self.C, self.n, self.n), dtype=np.float32)
+        x[0, self.src, self.dst] = 1.0
+        d = np.arange(self.n)
+        for c in range(self.atom_ch.shape[1]):
+            x[self.atom_ch[:, c], d, d] = 1.0
+        for c in range(self.bond_ch.shape[1]):
+            x[self.bond_ch[:, c], self.src, self.dst] = 1.0
+        return x
+
+
+def load_molhiv():
+    """ogbg-molhiv with the OGB scaffold split (scripts/prepare_molhiv.py).
+    Returns (train_graphs, train_labels, val_graphs, val_labels, test_graphs,
+    test_labels); graphs are object arrays of CompactGraph, labels int64."""
+    with open(BASE_DIR + "/data/MOLHIV/molhiv.p", "rb") as f:
+        d = pickle.load(f)
+    C = d["C"]
+    gs = np.empty(len(d["graphs"]), dtype=object)
+    ys = np.zeros(len(d["graphs"]), dtype=np.int64)
+    for i, g in enumerate(d["graphs"]):
+        gs[i] = CompactGraph(g["n"], C, g["src"].astype(np.int64), g["dst"].astype(np.int64),
+                             g["atom_ch"].astype(np.int64), g["bond_ch"].astype(np.int64))
+        ys[i] = g["y"]
+    out = []
+    for s in ("train", "valid", "test"):
+        idx = d["split"][s]
+        out += [gs[idx], ys[idx]]
+    return tuple(out)
 
 
 def group_same_size(graphs, labels):

@@ -20,12 +20,19 @@ class DataGenerator:
         # IDENTICAL size. ~2-3x fewer, fuller batches per epoch; the PPGN/topo
         # model masks padding exactly, so each graph's output is unchanged.
         self.padded = bool(getattr(config.architecture, 'padded_batching', False))
+        # ogbg-molhiv: fixed OGB split, compact graphs densified per batch
+        # (only the padded batching path supports them)
+        self.is_molhiv = self.config.dataset_name == 'MOLHIV'
+        if self.is_molhiv:
+            self.padded = True
 
         self.load_data()
 
     # load the specified dataset in the config to the data_generator instance
     def load_data(self):
-        if self.config.dataset_name == 'ZINC':
+        if self.is_molhiv:
+            self.load_molhiv_data()
+        elif self.config.dataset_name == 'ZINC':
             self.load_zinc_data()
         elif self.is_qm9:
             self.load_qm9_data()
@@ -33,6 +40,14 @@ class DataGenerator:
             self.load_data_benchmark()
 
         self.split_val_test_to_batches()
+
+    # ogbg-molhiv, OGB scaffold split (classification; metric ROC-AUC)
+    def load_molhiv_data(self):
+        tr_g, tr_y, va_g, va_y, te_g, te_y = helper.load_molhiv()
+        self.train_graphs, self.train_labels = tr_g, tr_y
+        self.val_graphs, self.val_labels = va_g, va_y
+        self.test_graphs, self.test_labels = te_g, te_y
+        self.train_size, self.val_size, self.test_size = len(tr_g), len(va_g), len(te_g)
 
     # load ZINC-12k (standard split); targets normalized by train mean / std,
     # reported MAE is multiplied back by labels_std (same as QM9)
@@ -157,7 +172,8 @@ class DataGenerator:
         out = np.zeros((len(graph_list), C, n, n), dtype=np.result_type(graph_list[0].dtype, np.float32))
         sizes = np.zeros(len(graph_list), dtype=np.int64)
         for k, g in enumerate(graph_list):
-            s = g.shape[1]; out[k, :, :s, :s] = g; sizes[k] = s
+            s = g.shape[1]; sizes[k] = s
+            out[k, :, :s, :s] = g.dense() if hasattr(g, 'dense') else g
         return out, sizes
 
     def _padded_batches(self, graphs, labels, shuffle):
@@ -178,11 +194,10 @@ class DataGenerator:
             chunks.append(np.asarray(cur))
         if shuffle:
             chunks = [chunks[i] for i in np.random.permutation(len(chunks))]
-        out = []
-        for idx in chunks:
-            g, n = self._pad_batch([graphs[i] for i in idx])
-            out.append((g, np.asarray(labels)[idx], n))
-        return out
+        # LAZY: batches are densified when iterated, so an epoch never holds
+        # the whole (padded, dense) dataset in memory. Same random draws as
+        # before, so the batches are identical.
+        return _LazyBatches(self, graphs, np.asarray(labels), chunks)
 
     def reshuffle_data(self):
         """
@@ -216,6 +231,12 @@ class DataGenerator:
 
     def split_val_test_to_batches(self):
         # Split the val and test sets to batchs, no shuffling is needed
+        if self.is_molhiv:            # compact graphs: padded path only
+            self._val_padded = self._padded_batches(self.val_graphs, self.val_labels, False)
+            self._test_padded = self._padded_batches(self.test_graphs, self.test_labels, False)
+            self.num_iterations_val = len(self._val_padded)
+            self.num_iterations_test = len(self._test_padded)
+            return
         graphs, labels = helper.group_same_size(self.val_graphs, self.val_labels)
         graphs, labels = helper.split_to_batches(graphs, labels, self.batch_size)
         self.num_iterations_val = len(graphs)
@@ -241,3 +262,19 @@ if __name__ == '__main__':
     data.initialize('train')
 
 
+class _LazyBatches:
+    """Sequence of padded batches, densified on access (len() and iteration
+    behave like the list it replaces)."""
+    def __init__(self, gen, graphs, labels, chunks):
+        self.gen, self.graphs, self.labels, self.chunks = gen, graphs, labels, chunks
+
+    def __len__(self):
+        return len(self.chunks)
+
+    def __getitem__(self, k):
+        idx = self.chunks[k]
+        g, n = self.gen._pad_batch([self.graphs[i] for i in idx])
+        return g, self.labels[idx], n
+
+    def __iter__(self):
+        return (self[k] for k in range(len(self.chunks)))

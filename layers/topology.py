@@ -441,13 +441,16 @@ _PLAN_CACHE = {}
 def get_plan(structs, device, reps=1, max_ph_dim=1, max_simplex_dim=None, backend='auto',
              M_pad=None):
     key = (tuple(map(id, structs)), reps, str(device), max_ph_dim, max_simplex_dim, backend, M_pad)
-    p = _PLAN_CACHE.get(key)
-    if p is None:
+    hit = _PLAN_CACHE.get(key)
+    if hit is None:
         if len(_PLAN_CACHE) > 8:
             _PLAN_CACHE.clear()
         p = BatchPlan(structs, device, reps, max_ph_dim, max_simplex_dim, backend, M_pad)
-        _PLAN_CACHE[key] = p
-    return p
+        # the entry holds the structs themselves, so the id()s in its key stay
+        # valid (cannot be recycled by new objects) for as long as it is cached
+        _PLAN_CACHE[key] = (p, list(structs))
+        return p
+    return hit[0]
 
 
 
