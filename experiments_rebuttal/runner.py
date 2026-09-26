@@ -348,6 +348,13 @@ PLANS["improve_other_fast"] = improve_plan(["PROTEINS", "IMDBBINARY"], extra=FAS
 # one plan per dataset, e.g. to pin one dataset per GPU
 for _ds in ["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"]:
     PLANS[f"improve_{_ds.lower()}_fast"] = improve_plan([_ds], extra=FAST, tag="_fast")
+# Headline comparison only: baseline vs the full model, all six datasets,
+# smallest first so results arrive early. Same file names as improve_*_fast,
+# so these jobs are skipped when the full ablation sweep runs later.
+PLANS["core_fast"] = [
+    j for ds in ["MUTAG", "PTC", "IMDBBINARY", "PROTEINS", "NCI1", "NCI109"]
+    for j in improve_plan([ds], extra=FAST, tag="_fast")
+    if j["model"] == "baseline" or j.get("variant") == "full_fast"]
 # same-pipeline message-passing baselines (no padding: they do not support it)
 PLANS["mp_baselines"] = list(jobs_for(["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"],
                                       ["mlp", "gcn", "gin", "gsn"], [0], range(1, 11)))
