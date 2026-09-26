@@ -31,8 +31,11 @@ Only earlier columns are ever added to later ones, so the result is a valid
 reduction and its pairing is the persistence pairing. If K columns are
 nonzero, the reduction has finished after at most K(K-1)/2 + 1 steps (the
 first j columns are final after sum_{i<j} i steps), so when the host-known
-bound is small a fixed number of steps is run with no synchronization;
-otherwise convergence is checked every few steps (one scalar sync each).
+bound is small a fixed number of steps is run with no synchronization.
+Otherwise the SAME steps are run sparsely: after one dense pass for the lows,
+each step touches only the colliding columns (typically a few dozen out of
+thousands), one sync per step; the pivots and updates are identical, so the
+result is bit-for-bit that of the dense steps.
 Zero-persistence pairs are dropped, as gudhi does.
 """
 import numpy as np
@@ -162,6 +165,8 @@ def _reduce_parallel(Mc, p, k_bound):
     if steps <= FIXED_STEPS_MAX:
         for _ in range(steps):                      # sync-free, provably enough
             Mc, _ = step(Mc)
+    elif dev.type != 'mps':                         # (no scatter_reduce on MPS)
+        return _reduce_sparse(Mc, p, inv)
     else:
         while True:                                 # one scalar sync per CHECK_EVERY
             for _ in range(CHECK_EVERY):
@@ -169,6 +174,47 @@ def _reduce_parallel(Mc, p, k_bound):
             if not bool(coll.any()):
                 break
     return lows(Mc), Mc
+
+
+def _last_nonzero(M):
+    """index of the lowest nonzero entry along the last dim; -1 if none."""
+    rows = torch.arange(1, M.shape[-1] + 1, device=M.device, dtype=torch.int32)
+    return ((M != 0) * rows).amax(dim=-1).long() - 1
+
+
+def _reduce_sparse(Mc, p, inv):
+    """The parallel reduction of _reduce_parallel with sparse steps: every
+    colliding column c (low shared with an earlier column) is reduced by the
+    leftmost column holding that low, exactly as in the dense step, but only
+    the colliding columns are gathered, updated and scattered back, and only
+    their lows recomputed: O(N K + C R) per step instead of several O(N K R)
+    passes. Pivots never collide in the step they are used (they are the
+    leftmost holders of their low), so the updates are conflict-free and the
+    result equals the dense reduction's."""
+    N, K, R = Mc.shape
+    dev = Mc.device
+    M = Mc.reshape(N * K, R)
+    low = _last_nonzero(M).reshape(N, K)
+    colidx = torch.arange(K, device=dev)[None, :].expand(N, K)
+    base = (torch.arange(N, device=dev) * K)[:, None]
+    while True:
+        # leftmost column holding each low (slot 0 collects the zero columns)
+        first = torch.full((N, R + 1), K, dtype=torch.long, device=dev)
+        first.scatter_reduce_(1, low + 1, colidx, reduce='amin')
+        piv = first.gather(1, low + 1)
+        coll = (low >= 0) & (piv < colidx)
+        idx = coll.reshape(-1).nonzero().squeeze(1)          # one sync per step
+        if idx.numel() == 0:
+            break
+        pidx = (base + piv).reshape(-1)[idx]
+        col, pcol = M[idx], M[pidx]                          # (C, R)
+        L = low.reshape(-1)[idx]
+        ar = torch.arange(idx.numel(), device=dev)
+        f = ((col[ar, L].long() * inv[pcol[ar, L].long()]) % p).to(M.dtype)
+        new = torch.remainder(col - f[:, None] * pcol, p)
+        M[idx] = new
+        low.view(-1)[idx] = _last_nonzero(new)
+    return low, M.reshape(N, K, R)
 
 
 def _reduce_chunked(build, N, K, R, p, k_bound, max_elems):
