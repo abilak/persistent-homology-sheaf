@@ -355,6 +355,14 @@ PLANS["core_fast"] = [
     j for ds in ["MUTAG", "PTC", "IMDBBINARY", "PROTEINS", "NCI1", "NCI109"]
     for j in improve_plan([ds], extra=FAST, tag="_fast")
     if j["model"] == "baseline" or j.get("variant") == "full_fast"]
+# Minimal ablation for the paper (molecular datasets): the rebuttal model
+# ("rev") and invertible norm + essential classes only ("ns_ess"). Together
+# with core_fast this gives baseline / rev / ns_ess / full. Same result
+# paths as improve_*_fast.
+PLANS["ablation_min_fast"] = [
+    j for ds in ["MUTAG", "PTC", "NCI1", "NCI109"]
+    for j in improve_plan([ds], extra=FAST, tag="_fast")
+    if j.get("variant") in ("rev_fast", "ns_ess_fast")]
 # same-pipeline message-passing baselines (no padding: they do not support it)
 PLANS["mp_baselines"] = list(jobs_for(["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"],
                                       ["mlp", "gcn", "gin", "gsn"], [0], range(1, 11)))
