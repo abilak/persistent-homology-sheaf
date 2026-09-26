@@ -1,5 +1,6 @@
 # import tensorflow as tf
 import os
+from contextlib import contextmanager, nullcontext
 from tqdm import tqdm
 import numpy as np
 import torch
@@ -21,6 +22,42 @@ def _host(x):
         x = x.detach().cpu()
         return float(x) if x.numel() == 1 else x.numpy()
     return x
+
+class WeightEMA:
+    """Exponential moving average of the model parameters, used for
+    evaluation only (training updates the raw parameters as usual):
+        shadow <- d_t * shadow + (1 - d_t) * theta   after every optimizer step,
+    d_t = min(decay, (1 + t) / (10 + t)), the usual warm-up, so the average is
+    not dominated by the initialization early in training. The averaged
+    weights are another parameter setting of the SAME network, so
+    equivariance and the expressivity results are unaffected. Buffers (none
+    in these models) are left as they are."""
+
+    def __init__(self, model, decay):
+        self.decay, self.t = float(decay), 0
+        self.params = [p for p in model.parameters() if p.requires_grad]
+        self.shadow = [p.detach().clone() for p in self.params]
+
+    @torch.no_grad()
+    def update(self):
+        self.t += 1
+        d = min(self.decay, (1.0 + self.t) / (10.0 + self.t))
+        torch._foreach_lerp_(self.shadow, [p.detach() for p in self.params], 1.0 - d)
+
+    @contextmanager
+    def applied(self):
+        """temporarily load the averaged weights into the model"""
+        with torch.no_grad():
+            raw = [p.detach().clone() for p in self.params]
+            for p, s in zip(self.params, self.shadow):
+                p.copy_(s)
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                for p, r in zip(self.params, raw):
+                    p.copy_(r)
+
 
 class Trainer(object):
     def __init__(self, model_wrapper, data, config):
@@ -48,6 +85,14 @@ class Trainer(object):
             self.optimizer = torch.optim.Adam(params=self.model_wrapper.model.parameters(),
                                               lr=self.config.hyperparams.learning_rate, **fused)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=20, gamma=config.hyperparams.decay_rate)
+        # optional weight averaging for evaluation (architecture.ema_decay,
+        # e.g. 0.99; 0 / absent = off, the original behaviour)
+        decay = float(getattr(self.config.architecture, 'ema_decay', 0) or 0)
+        self.ema = WeightEMA(self.model_wrapper.model, decay) if decay > 0 else None
+
+    def eval_weights(self):
+        """context: evaluate with the averaged weights when EMA is on"""
+        return self.ema.applied() if self.ema is not None else nullcontext()
 
     def train(self):
         """
@@ -130,6 +175,8 @@ class Trainer(object):
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        if self.ema is not None:
+            self.ema.update()
 
         return loss.detach(), correct_labels_or_distances
 
@@ -153,7 +200,7 @@ class Trainer(object):
         # Iterate over batches. No autograd during validation: the backward
         # graph is never used here, and for the topology branch retaining it
         # is expensive in both time and memory.
-        with torch.no_grad():
+        with torch.no_grad(), self.eval_weights():
             for cur_it in range(self.data_loader.num_iterations_val):
                 graph, label = self.data_loader.next_batch()
                 loss, correct_or_dist = \
@@ -206,7 +253,7 @@ class Trainer(object):
         total_dists = 0.
 
         # Iterate over batches (no autograd needed at test time)
-        with torch.no_grad():
+        with torch.no_grad(), self.eval_weights():
             for cur_it in tt:
                 graph, label = self.data_loader.next_batch()
                 loss, dists = self.model_wrapper.run_model_get_loss_and_results(graph, label)

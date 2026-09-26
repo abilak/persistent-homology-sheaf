@@ -421,6 +421,22 @@ def unpadded_plan(dataset, seed=0):
 
 for _ds in ["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY", "IMDBMULTI", "ENZYMES"]:
     PLANS["unpadded_" + _ds.lower()] = unpadded_plan(_ds)
+# Weight averaging (EMA of the parameters, decay 0.99, used for evaluation):
+# the same plans with ema_decay added for EVERY model, baseline included.
+# Variant tags get "_ema" (baseline/fast_ema, topo/full_fast_ema, ...), so the
+# results sit next to the non-EMA ones. Compare within EMA runs only:
+#   compare_variant.py DS fast_ema   -> read the full_fast_ema row
+EMA = {"ema_decay": 0.99}
+
+
+def ema_plan(jobs):
+    return [dict(j, variant=(j.get("variant") or "") + "_ema",
+                 overrides=dict(j.get("overrides") or {}, **EMA)) for j in jobs]
+
+
+for _name in ["core_fast", "extra_tu_fast", "zinc_fast", "molhiv_fast"] + \
+        [f"core_fast_{d.lower()}" for d in ["MUTAG", "PTC", "IMDBBINARY", "PROTEINS", "NCI1", "NCI109"]]:
+    PLANS[_name + "_ema"] = ema_plan(PLANS[_name])
 # same-pipeline message-passing baselines (no padding: they do not support it)
 PLANS["mp_baselines"] = list(jobs_for(["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"],
                                       ["mlp", "gcn", "gin", "gsn"], [0], range(1, 11)))

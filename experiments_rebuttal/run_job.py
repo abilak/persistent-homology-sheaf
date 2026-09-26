@@ -136,8 +136,9 @@ def _run_regression(cfg, data, mw, tr, n_params, dataset, model_type, seed, fold
         t0 = time.time()
         tr.train_epoch(ep)
         epoch_times.append(time.time() - t0)
-        val_curve.append(round(_mae(mw, data, 'val'), 6))
-        test_curve.append(round(_mae(mw, data, 'test'), 6))
+        with tr.eval_weights():
+            val_curve.append(round(_mae(mw, data, 'val'), 6))
+            test_curve.append(round(_mae(mw, data, 'test'), 6))
     best = int(np.argmin(val_curve))
     return dict(
         dataset=dataset, model=model_type, seed=int(seed), fold=int(fold),
@@ -180,8 +181,9 @@ def _run_auc(cfg, data, mw, tr, n_params, dataset, model_type, seed, fold, overr
         t0 = time.time()
         tr.train_epoch(ep)
         epoch_times.append(time.time() - t0)
-        val_curve.append(round(_auc(mw, data, 'val'), 6))
-        test_curve.append(round(_auc(mw, data, 'test'), 6))
+        with tr.eval_weights():
+            val_curve.append(round(_auc(mw, data, 'val'), 6))
+            test_curve.append(round(_auc(mw, data, 'test'), 6))
     best = int(np.argmax(val_curve))
     return dict(
         dataset=dataset, model=model_type, seed=int(seed), fold=int(fold),
