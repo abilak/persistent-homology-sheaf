@@ -402,6 +402,21 @@ PLANS["zinc_ablation_fast"] = zinc_plan(["rev", "ns_ess"], with_baseline=False)
 #   ogbg-molhiv: OGB scaffold split, 4 seeds, test ROC-AUC at the best-val epoch.
 PLANS["molhiv_fast"] = fixed_split_plan("MOLHIV", ["full"])
 PLANS["molhiv_ablation_fast"] = fixed_split_plan("MOLHIV", ["rev", "ns_ess"], with_baseline=False)
+# Step-count check: padded batching takes ~2-2.5x fewer optimizer steps per
+# epoch than the original same-size batching under the same per-epoch
+# schedule. This reruns the original (unpadded) batching for one dataset, so
+# the fast results can be checked against it:  unpadded_plan("IMDBBINARY")
+def unpadded_plan(dataset, seed=0):
+    V = dict(IMPROVE_VARIANTS)
+    return ([dict(dataset=dataset, model="baseline", seed=seed, fold=f, epochs=None,
+                  variant="unpadded", overrides={"padded_batching": False}) for f in range(1, 11)]
+            + [dict(dataset=dataset, model="topo", seed=seed, fold=f, epochs=None,
+                    variant="full_unpadded", overrides=dict(V["full"], padded_batching=False))
+               for f in range(1, 11)])
+
+
+for _ds in ["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY", "IMDBMULTI", "ENZYMES"]:
+    PLANS["unpadded_" + _ds.lower()] = unpadded_plan(_ds)
 # same-pipeline message-passing baselines (no padding: they do not support it)
 PLANS["mp_baselines"] = list(jobs_for(["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY"],
                                       ["mlp", "gcn", "gin", "gsn"], [0], range(1, 11)))
