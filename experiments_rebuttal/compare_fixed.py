@@ -38,8 +38,10 @@ print(f"{dataset} {name} at best-val epoch ({'lower' if lower else 'higher'} is 
 print(f"{'variant':<18}{name:<20}{'paired vs baseline (seeds)':<34}{'95% CI':<20}{'perm p':<9}{'Wilcoxon p'}")
 print("-" * 112)
 for (m, v), runs in sorted(pools.items()):
-    if m != "topo":
+    if m == "baseline":
         continue
+    if m != "topo":
+        v = f"{m}/{v}"
     seeds = sorted(set(runs) & set(b))
     vals = np.array(list(runs.values()))
     d = np.array([runs[s] - b[s] for s in seeds])

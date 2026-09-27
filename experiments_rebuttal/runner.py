@@ -479,6 +479,21 @@ PLANS["zinc_fast_s10"] = zinc_plan(["full"], seeds=S10)
 PLANS["molhiv_fast_s10"] = fixed_split_plan("MOLHIV", ["full"], seeds=S10)
 PLANS["wide_zinc_fast_s10"] = wide_plan(["ZINC"], seeds=S10, fixed_split=True)
 PLANS["wide_molhiv_fast_s10"] = wide_plan(["MOLHIV"], seeds=S10, fixed_split=True)
+# Same-pipeline message-passing baselines WITH the fast (padded) pipeline, so
+# they share batching with every other fast run (masking is exact: padded
+# batch == graphs alone to 1e-14). Variant "fast": gin_s0_f1_fast.json etc.
+#   compare_variant.py DS fast   -> rows gin/fast, gcn/fast, ...
+MP = ["mlp", "gcn", "gin", "gsn"]
+PLANS["mp_fast"] = [dict(dataset=ds, model=m, seed=0, fold=f, epochs=None, variant="fast",
+                         overrides=dict(FAST))
+                    for ds in ["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "ENZYMES",
+                               "IMDBBINARY", "IMDBMULTI"] for m in MP for f in range(1, 11)]
+PLANS["mp_zinc_fast_s10"] = [dict(dataset="ZINC", model=m, seed=sd, fold=1, epochs=None,
+                                  variant="fast", overrides=dict(FAST)) for m in MP for sd in range(10)]
+PLANS["mp_molhiv_fast_s10"] = [dict(dataset="MOLHIV", model=m, seed=sd, fold=1, epochs=None,
+                                    variant="fast", overrides=dict(FAST)) for m in MP for sd in range(10)]
+
+
 # ---- Studies modeled on TOGL (ICLR 2022) --------------------------------
 def tu_pair(ds, tag, base_ov, full_ov, folds=range(1, 11), models=("baseline", "topo")):
     """baseline/<tag> and topo/full_<tag> jobs on one TU dataset"""

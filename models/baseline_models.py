@@ -46,11 +46,16 @@ def structural_counts(A_bin_np):
     return counts
 
 
-def gsn_node_features(A_bin):
-    """A_bin: B x M x M tensor -> B x M x len(_CYCLE_LENGTHS) cycle counts."""
+def gsn_node_features(A_bin, n_real=None):
+    """A_bin: B x M x M tensor -> B x M x len(_CYCLE_LENGTHS) cycle counts.
+    With padding (n_real given), counts are computed on each graph's real
+    nodes (so the cache is shared with unpadded runs) and padded rows are 0."""
     B, M, _ = A_bin.shape
     arr = A_bin.detach().cpu().numpy()
-    feats = np.stack([structural_counts(arr[b]) for b in range(B)], axis=0)
+    feats = np.zeros((B, M, len(_CYCLE_LENGTHS)), dtype=np.float32)
+    for b in range(B):
+        n = M if n_real is None else int(n_real[b])
+        feats[b, :n] = structural_counts(arr[b, :n, :n])
     return torch.from_numpy(feats).to(A_bin.device)
 
 
@@ -75,12 +80,19 @@ class MLPBlock(nn.Module):
         self.lin2 = nn.Linear(dout, dout)
         self.bn = nn.BatchNorm1d(dout)
 
-    def forward(self, h):  # h: B x M x d
+    def forward(self, h, idx=None, mask=None):  # h: B x M x d
+        """idx: flat indices of real nodes (padded batches); BatchNorm then
+        uses real nodes only and padded rows are zeroed."""
         B, M, _ = h.shape
         h = F.relu(self.lin1(h))
         h = self.lin2(h)
-        h = self.bn(h.reshape(B * M, -1)).reshape(B, M, -1)
-        return F.relu(h)
+        flat = h.reshape(B * M, -1)
+        if idx is None:
+            flat = self.bn(flat)
+        else:
+            flat = torch.zeros_like(flat).index_copy(0, idx, self.bn(flat.index_select(0, idx)))
+        h = F.relu(flat.reshape(B, M, -1))
+        return h if mask is None else h * mask[:, :, None]
 
 
 class BaselineModel(nn.Module):
@@ -133,17 +145,24 @@ class BaselineModel(nn.Module):
         raise ValueError(self.kind)
 
     def forward(self, input):
-        if getattr(input, '_n_real', None) is not None:
-            raise NotImplementedError(
-                "padded_batching is implemented (with exact masking) for the "
-                "PPGN / PPGN+PH model only; run MLP/GCN/GIN/GSN without it")
+        # padded batches: padded nodes have no edges and zero features; they
+        # are excluded from BatchNorm statistics and zeroed after every layer,
+        # so they never reach a real node or the sum readout.
+        n_real = getattr(input, '_n_real', None)
+        mask = getattr(input, '_node_mask', None)
+        if n_real is not None and mask is None:
+            M = input.shape[-1]
+            mask = torch.arange(M, device=input.device)[None, :] < torch.as_tensor(n_real, device=input.device)[:, None]
+        idx = mask.reshape(-1).nonzero().squeeze(1) if mask is not None else None
         h, A_norm, A_bin = extract_nodes(input)
         if self.kind == 'gsn':
-            h = torch.cat([h, gsn_node_features(A_bin)], dim=-1)  # + cycle counts
+            h = torch.cat([h, gsn_node_features(A_bin, n_real)], dim=-1)  # + cycle counts
+        if mask is not None:
+            h = h * mask[:, :, None]
         pooled = [h.sum(dim=1)]                         # input layer readout
         for i, layer in enumerate(self.layers):
             m = self._aggregate(h, A_norm, A_bin, i)
-            h = layer(m)
+            h = layer(m, idx, mask)
             pooled.append(h.sum(dim=1))                 # sum readout per layer
         score = 0
         for cl, p in zip(self.classifiers, pooled):

@@ -78,6 +78,11 @@ def tu_table():
         b = tu_scores(P, ("baseline", "fast" + SUF))
         w = tu_scores(P, ("baseline", "wide_fast" + SUF))
         t = tu_scores(P, ("topo", "full_fast" + SUF))
+        for mp in ("mlp", "gcn", "gin", "gsn"):
+            sm = tu_scores(P, (mp, "fast" + SUF))
+            rows[mp].append(fmt(sm.mean(), sm.std(ddof=1)) if sm is not None else PH)
+        st = tu_scores(P, ("topo", "full_static_fast" + SUF))
+        rows["static"].append(fmt(st.mean(), st.std(ddof=1)) if st is not None else PH)
         rows["base"].append(fmt(b.mean(), b.std(ddof=1)) if b is not None else PH)
         rows["wide"].append(fmt(w.mean(), w.std(ddof=1)) if w is not None else PH)
         rows["full"].append(fmt(t.mean(), t.std(ddof=1)) if t is not None else PH)
@@ -94,7 +99,9 @@ def tu_table():
                 rows[k].append(PH)
     print("% ---- TU table (paste into tab:tu) ----")
     print("% columns: " + " & ".join(NAMES.get(d, d) for d in TU))
-    for label, key in [("PPGN backbone", "base"), ("PPGN backbone, widened", "wide"),
+    for label, key in [("MLP (no message passing)", "mlp"), ("GCN", "gcn"), ("GIN", "gin"),
+                       ("GSN (cycles 3--6)", "gsn"), ("PPGN backbone", "base"),
+                       ("PPGN backbone, widened", "wide"), ("PPGN+PH, static control", "static"),
                        ("PPGN+PH (ours)", "full"), ("Paired gain", "gain"),
                        ("Paired 95\\% CI", "ci"), ("Permutation $p$", "perm"),
                        ("Wilcoxon $p$ (exact)", "wil"), ("Folds better", "pos")]:
@@ -110,7 +117,9 @@ def fixed_table():
     for ds, stat, scale in [("ZINC", "test_mae_at_best_val", 1.0), ("MOLHIV", "test_auc_at_best_val", 100.0)]:
         P = pools(ds)
         cells = []
-        for key in [("baseline", "fast" + SUF), ("baseline", "wide_fast" + SUF), ("topo", "full_fast" + SUF)]:
+        for key in [(m, "fast" + SUF) for m in ("mlp", "gcn", "gin", "gsn")] + [
+                ("baseline", "fast" + SUF), ("baseline", "wide_fast" + SUF),
+                ("topo", "full_static_fast" + SUF), ("topo", "full_fast" + SUF)]:
             v = np.array(list(seed_values(P, key, stat).values())) * scale
             cells.append(f"{v.mean():.3f}{{\\scriptsize$\\pm${v.std(ddof=1) if len(v) > 1 else 0:.3f}}} ($n={len(v)}$)"
                          if len(v) else PH)

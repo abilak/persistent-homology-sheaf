@@ -49,8 +49,10 @@ print(f"\nbaseline{'/'+bkey[1] if bkey[1] else ''}: "
 print(f"{'topo variant':<18}{'Xu acc':<18}{'paired vs baseline':<24}{'perm p'}")
 print("-" * 76)
 for (m, v), runs in sorted(pools.items()):
-    if m != "topo":
+    if m == "baseline":
         continue
+    if m != "topo":
+        v = f"{m}/{v}"                      # message-passing baselines (gin/fast, ...)
     st, _ = per_fold_scores(runs, xu=True)
     if st is None or len(st) != len(sb):
         print(f"{v or '(main)':<18}incomplete ({0 if st is None else len(st)} folds)")
