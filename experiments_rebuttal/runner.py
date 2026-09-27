@@ -470,6 +470,15 @@ def ppgn_plan(datasets, folds=range(1, 11), models=("baseline", "topo")):
 PLANS["ppgn_pilot"] = ppgn_plan(["NCI1"], folds=[1])       # 2 jobs: measure time + memory first
 for _ds in PPGN_SCHED:
     PLANS["ppgn_" + _ds.lower()] = ppgn_plan([_ds])
+# 10-seed versions of the fixed-split plans (same result paths, so the first
+# 4 seeds already run are skipped): with n paired seeds the smallest two-sided
+# sign-flip p is 2/2^n, i.e. 0.125 at n=4 but 0.002 at n=10. OGB also asks for
+# 10 seeds on ogbg-molhiv.
+S10 = tuple(range(10))
+PLANS["zinc_fast_s10"] = zinc_plan(["full"], seeds=S10)
+PLANS["molhiv_fast_s10"] = fixed_split_plan("MOLHIV", ["full"], seeds=S10)
+PLANS["wide_zinc_fast_s10"] = wide_plan(["ZINC"], seeds=S10, fixed_split=True)
+PLANS["wide_molhiv_fast_s10"] = wide_plan(["MOLHIV"], seeds=S10, fixed_split=True)
 # Weight averaging (EMA of the parameters, decay 0.99, used for evaluation):
 # the same plans with ema_decay added for EVERY model, baseline included.
 # Variant tags get "_ema" (baseline/fast_ema, topo/full_fast_ema, ...), so the
