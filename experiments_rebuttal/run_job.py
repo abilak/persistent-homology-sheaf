@@ -63,6 +63,8 @@ def build_config(dataset, model_type, overrides=None):
         for k, v in overrides.items():
             if k in ('learning_rate', 'decay_rate', 'batch_size'):
                 cfg.hyperparams[k] = v
+            elif k == 'num_epochs':
+                cfg.num_epochs = int(v)
             elif k == 'block_width':
                 cfg.architecture.block_features = [v] * len(a['block'])
             else:  # architecture knobs (topo_hidden_dim, topo_num_stats, ...)

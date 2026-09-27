@@ -442,6 +442,34 @@ PLANS["wide_fast_proteins"] = wide_plan(["PROTEINS"])          # memory-heavy: 1
 PLANS["wide_extra_tu_fast"] = wide_plan(["IMDBMULTI", "ENZYMES"])
 PLANS["wide_zinc_fast"] = wide_plan(["ZINC"], seeds=(0, 1, 2, 3), fixed_split=True)
 PLANS["wide_molhiv_fast"] = wide_plan(["MOLHIV"], seeds=(0, 1, 2, 3), fixed_split=True)
+# PPGN's published configuration ("version 1" of the reference code: three
+# blocks of width 400, batch size 5, same-size batching, and the ORIGINAL
+# per-dataset schedules of that code, which differ from utils/config.py on
+# MUTAG and PTC). Baseline = PPGN as published; full = PPGN+PH on that backbone.
+# Compare with:  compare_variant.py DS ppgn   (read the full_ppgn row)
+PPGN_SCHED = {  # dataset: (learning rate, decay per 20 epochs, epochs)
+    "IMDBBINARY": (5e-5, 0.5, 100), "IMDBMULTI": (1e-4, 0.75, 150), "MUTAG": (1e-4, 1.0, 500),
+    "NCI1": (1e-4, 0.75, 200), "NCI109": (1e-4, 0.75, 250), "PROTEINS": (1e-3, 0.5, 100),
+    "PTC": (1e-4, 1.0, 400)}
+
+
+def ppgn_plan(datasets, folds=range(1, 11), models=("baseline", "topo")):
+    jobs = []
+    for ds in datasets:
+        lr, dec, ep = PPGN_SCHED[ds]
+        common = dict(block_features=[400, 400, 400], batch_size=5, learning_rate=lr,
+                      decay_rate=dec, num_epochs=ep, padded_batching=False)
+        for m in models:
+            ov = dict(common) if m == "baseline" else dict(FULL, **common)
+            jobs += [dict(dataset=ds, model=m, seed=0, fold=f, epochs=None,
+                          variant="ppgn" if m == "baseline" else "full_ppgn", overrides=ov)
+                     for f in folds]
+    return jobs
+
+
+PLANS["ppgn_pilot"] = ppgn_plan(["NCI1"], folds=[1])       # 2 jobs: measure time + memory first
+for _ds in PPGN_SCHED:
+    PLANS["ppgn_" + _ds.lower()] = ppgn_plan([_ds])
 # Weight averaging (EMA of the parameters, decay 0.99, used for evaluation):
 # the same plans with ema_decay added for EVERY model, baseline included.
 # Variant tags get "_ema" (baseline/fast_ema, topo/full_fast_ema, ...), so the
