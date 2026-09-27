@@ -113,17 +113,22 @@ def seed_values(P, key, stat):
 
 
 def fixed_table():
-    print("\n% ---- fixed-split table (paste into tab:mol) ----")
-    for ds, stat, scale in [("ZINC", "test_mae_at_best_val", 1.0), ("MOLHIV", "test_auc_at_best_val", 100.0)]:
-        P = pools(ds)
+    print("\n% ---- fixed-split table (paste into tab:mol): rows = models, columns = ZINC MAE, molhiv ROC-AUC ----")
+    specs = [("ZINC", "test_mae_at_best_val", 1.0), ("MOLHIV", "test_auc_at_best_val", 100.0)]
+    models = [("MLP (no message passing)", ("mlp", "fast")), ("GCN", ("gcn", "fast")), ("GIN", ("gin", "fast")),
+              ("GSN (cycles 3--6)", ("gsn", "fast")), ("PPGN backbone", ("baseline", "fast")),
+              ("PPGN backbone, widened", ("baseline", "wide_fast")),
+              ("PPGN+PH, static control", ("topo", "full_static_fast")), ("PPGN+PH (ours)", ("topo", "full_fast"))]
+    pools_by = {ds: pools(ds) for ds, _, _ in specs}
+    for label, (m, v) in models:
         cells = []
-        for key in [(m, "fast" + SUF) for m in ("mlp", "gcn", "gin", "gsn")] + [
-                ("baseline", "fast" + SUF), ("baseline", "wide_fast" + SUF),
-                ("topo", "full_static_fast" + SUF), ("topo", "full_fast" + SUF)]:
-            v = np.array(list(seed_values(P, key, stat).values())) * scale
-            cells.append(f"{v.mean():.3f}{{\\scriptsize$\\pm${v.std(ddof=1) if len(v) > 1 else 0:.3f}}} ($n={len(v)}$)"
-                         if len(v) else PH)
-        print(f"{ds} & " + " & ".join(cells) + r" \\")
+        for ds, stat, scale in specs:
+            vals = np.array(list(seed_values(pools_by[ds], (m, v + SUF), stat).values())) * scale
+            cells.append(f"{vals.mean():.3f}{{\\scriptsize$\\pm${vals.std(ddof=1) if len(vals) > 1 else 0:.3f}}}"
+                         if len(vals) else PH)
+        print(f"{label} & " + " & ".join(cells) + r" \\")
+    for ds, stat, scale in specs:
+        P = pools_by[ds]
         bb = seed_values(P, ("baseline", "fast" + SUF), stat)
         tt = seed_values(P, ("topo", "full_fast" + SUF), stat)
         common = sorted(set(bb) & set(tt))
