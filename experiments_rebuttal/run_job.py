@@ -65,6 +65,10 @@ def build_config(dataset, model_type, overrides=None):
                 cfg.hyperparams[k] = v
             elif k == 'num_epochs':
                 cfg.num_epochs = int(v)
+            elif k == 'structure_only':
+                cfg.architecture.structure_only = bool(v)
+                if v:
+                    cfg.node_labels = 0         # adjacency channel only
             elif k == 'block_width':
                 cfg.architecture.block_features = [v] * len(a['block'])
             else:  # architecture knobs (topo_hidden_dim, topo_num_stats, ...)

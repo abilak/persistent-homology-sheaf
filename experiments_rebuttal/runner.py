@@ -479,6 +479,75 @@ PLANS["zinc_fast_s10"] = zinc_plan(["full"], seeds=S10)
 PLANS["molhiv_fast_s10"] = fixed_split_plan("MOLHIV", ["full"], seeds=S10)
 PLANS["wide_zinc_fast_s10"] = wide_plan(["ZINC"], seeds=S10, fixed_split=True)
 PLANS["wide_molhiv_fast_s10"] = wide_plan(["MOLHIV"], seeds=S10, fixed_split=True)
+# ---- Studies modeled on TOGL (ICLR 2022) --------------------------------
+def tu_pair(ds, tag, base_ov, full_ov, folds=range(1, 11), models=("baseline", "topo")):
+    """baseline/<tag> and topo/full_<tag> jobs on one TU dataset"""
+    jobs = []
+    if "baseline" in models:
+        jobs += [dict(dataset=ds, model="baseline", seed=0, fold=f, epochs=None,
+                      variant=tag, overrides=dict(base_ov)) for f in folds]
+    if "topo" in models:
+        jobs += [dict(dataset=ds, model="topo", seed=0, fold=f, epochs=None,
+                      variant="full_" + tag, overrides=dict(full_ov)) for f in folds]
+    return jobs
+
+
+def fixed_pair(ds, tag, base_ov, full_ov, seeds=(0, 1, 2, 3), models=("baseline", "topo")):
+    jobs = []
+    if "baseline" in models:
+        jobs += [dict(dataset=ds, model="baseline", seed=sd, fold=1, epochs=None,
+                      variant=tag, overrides=dict(base_ov)) for sd in seeds]
+    if "topo" in models:
+        jobs += [dict(dataset=ds, model="topo", seed=sd, fold=1, epochs=None,
+                      variant="full_" + tag, overrides=dict(full_ov)) for sd in seeds]
+    return jobs
+
+
+# (1) STATIC CONTROL: same branch and parameters, but each simplex enters as its
+# own "pair" (learned filtration value + simplex counts), no homology. Compares
+# homology against graph-level statistics of the same learned filtration.
+#   compare_variant.py DS fast   -> rows full_fast and full_static_fast
+STATIC = dict(FULL, topo_static=True, **FAST)
+PLANS["static_fast"] = [dict(dataset=ds, model="topo", seed=0, fold=f, epochs=None,
+                             variant="full_static_fast", overrides=dict(STATIC))
+                        for ds in ["MUTAG", "PTC", "IMDBBINARY", "NCI1", "NCI109"] for f in range(1, 11)]
+PLANS["static_fast_proteins"] = [dict(dataset="PROTEINS", model="topo", seed=0, fold=f, epochs=None,
+                                      variant="full_static_fast", overrides=dict(STATIC)) for f in range(1, 11)]
+PLANS["static_zinc_fast_s10"] = [dict(dataset="ZINC", model="topo", seed=sd, fold=1, epochs=None,
+                                      variant="full_static_fast", overrides=dict(STATIC)) for sd in range(10)]
+
+# (2) STRUCTURE ONLY: node labels removed (adjacency only), baseline and full.
+#   compare_variant.py DS struct_fast   -> row full_struct_fast
+STRUCT_B = dict(FAST, structure_only=True)
+STRUCT_F = dict(FULL, structure_only=True, **FAST)
+PLANS["structure_fast"] = [j for ds in ["MUTAG", "PTC", "ENZYMES", "NCI1"]
+                           for j in tu_pair(ds, "struct_fast", STRUCT_B, STRUCT_F)]
+PLANS["structure_fast_proteins"] = tu_pair("PROTEINS", "struct_fast", STRUCT_B, STRUCT_F)
+
+# (3) PLACEMENT: topology only after the last block (vs after every block).
+#   compare_variant.py DS fast   -> rows full_fast and full_last_fast
+LAST = dict(FULL, topo_apply_layers="last", **FAST)
+PLANS["placement_fast"] = [dict(dataset=ds, model="topo", seed=0, fold=f, epochs=None,
+                                variant="full_last_fast", overrides=dict(LAST))
+                           for ds in ["MUTAG", "PTC", "NCI1", "NCI109"] for f in range(1, 11)]
+PLANS["placement_zinc_fast_s10"] = [dict(dataset="ZINC", model="topo", seed=sd, fold=1, epochs=None,
+                                         variant="full_last_fast", overrides=dict(LAST)) for sd in range(10)]
+
+
+# (4) DEPTH: L equivariant blocks (main results use L = 2), baseline and full.
+#   compare_variant.py DS L<k>_fast   -> row full_L<k>_fast
+def depth_jobs(ds, L, fixed_split=False):
+    w = 32 if ds == "PTC" else 64
+    bo = dict(FAST, block_features=[w] * L)
+    fo = dict(FULL, block_features=[w] * L, **FAST)
+    return (fixed_pair(ds, f"L{L}_fast", bo, fo) if fixed_split
+            else tu_pair(ds, f"L{L}_fast", bo, fo))
+
+
+for _ds in ["MUTAG", "PTC", "NCI1"]:
+    PLANS["depth_" + _ds.lower()] = [j for L in (1, 3, 4) for j in depth_jobs(_ds, L)]
+PLANS["depth_zinc"] = [j for L in (1, 3, 4) for j in depth_jobs("ZINC", L, fixed_split=True)]
+
 # Weight averaging (EMA of the parameters, decay 0.99, used for evaluation):
 # the same plans with ema_decay added for EVERY model, baseline included.
 # Variant tags get "_ema" (baseline/fast_ema, topo/full_fast_ema, ...), so the

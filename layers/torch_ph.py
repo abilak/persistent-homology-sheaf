@@ -430,3 +430,43 @@ def torch_persistence(adj, plan, P1, essential, node_level, M, p=11):
         for b in blocks.values():
             b['inv'] = None
     return blocks
+
+
+def static_blocks(adj, plan, P1, essential, node_level, M):
+    """Control without topology ("static" variant, as in TOGL): the same dense
+    blocks as torch_persistence, but block p holds one entry per p-SIMPLEX
+    (birth = its filtration value, constant persistence 1) instead of the
+    persistence pairs, and no essential classes. The vectorization, its
+    parameters, and the multiplicity coordinates (now simplex counts) are
+    unchanged, so the model sees the learned filtration values and clique
+    counts but no homology. Involved nodes of a simplex are its vertices."""
+    tp = plan.torch_ph
+    dev = adj.device
+    N, n, m = tp['N'], tp['n'], tp['m']
+    ar = torch.arange(n, device=dev)
+    vv = take(adj, tp['vg'])
+    vmask = tp['vmask']
+    inv0 = ((ar[:, None] == ar[None, :])[None] & vmask[:, :, None]) if node_level else None
+    blocks = {('fin', 0): dict(b=vv, d=vv + 1.0, valid=vmask, inv=inv0)}
+    if P1 > 1 and m:
+        ev = take(adj, tp['eg'])
+        emask = tp['emask']
+        inv1 = (((tp['ea'][:, :, None] == ar) | (tp['eb'][:, :, None] == ar)) & emask[:, :, None]
+                if node_level else None)
+        blocks[('fin', 1)] = dict(b=ev, d=ev + 1.0, valid=emask, inv=inv1)
+    if P1 > 2 and tp.get('T', 0):
+        tv = take(adj, tp['tg'])
+        tmask = tp['tmask']
+        inv2 = None
+        if node_level:
+            verts = plan.t['tv']                                   # (N, T, 3) local vertices
+            inv2 = ((verts[:, :, :, None] == ar).any(2)) & tmask[:, :, None]
+        blocks[('fin', 2)] = dict(b=tv, d=tv + 1.0, valid=tmask, inv=inv2)
+    if essential:
+        for d in range(P1):
+            fb = blocks.get(('fin', d))
+            if fb is not None:
+                blocks[('ess', d)] = dict(
+                    b=fb['b'], valid=torch.zeros_like(fb['valid']),
+                    inv=None if fb['inv'] is None else torch.zeros_like(fb['inv']))
+    return blocks

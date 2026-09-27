@@ -577,9 +577,11 @@ class DifferentiablePH(nn.Module):
     gradient flow through the filtration values. Consumes cached GraphStructs.
     """
     def __init__(self, max_ph_dim=1, vec_dim=16, multiplicity=False,
-                 scale_stats=False, essential=False):
+                 scale_stats=False, essential=False, static=False):
         super().__init__()
         self.max_ph_dim = max_ph_dim
+        # static: control without topology (layers/torch_ph.static_blocks)
+        self.static = static
         self.vec_dim = vec_dim
         # essential: also vectorize ESSENTIAL classes (death = infinity), which
         # the base model discards. Each dimension gets a second block: attention
@@ -720,10 +722,14 @@ class DifferentiablePH(nn.Module):
 
         if plan is not None and plan.use_torch_ph and plan.reps * plan.B == B:
             # GPU-resident persistence: no host synchronization anywhere
-            from layers.torch_ph import torch_persistence
-            blocks = torch_persistence(adj, plan, P1, self.essential, node_level, M)
+            from layers.torch_ph import torch_persistence, static_blocks
+            blocks = (static_blocks if self.static else torch_persistence)(
+                adj, plan, P1, self.essential, node_level, M)
             return self._vectorize_dense(blocks, B, P1, M, adj.dtype, device)
         else:
+            if self.static:
+                raise RuntimeError("static control needs the torch persistence path "
+                                   "(batch not eligible: complex too large or mixed sizes)")
             if not GUDHI_AVAILABLE:
                 return zeros_out()
             coo = self._gudhi_pairs(adj, filt_batch, offsets, P1, M, device)
@@ -984,9 +990,11 @@ class TopologyLayer(nn.Module):
                  gate_bias=2.0, node_level=True, multiplicity=False,
                  scale_stats=False, gate_mode='conv', gate_init=0.0,
                  norm_stats=False, essential=False, filt_squash=False,
-                 num_filtrations=1, ph_backend='auto'):
+                 num_filtrations=1, ph_backend='auto', static=False):
         super().__init__()
         self.node_level = node_level
+        if static:                   # the static control is implemented in the torch path
+            ph_backend = 'torch'
         self.norm_stats = norm_stats
         self.gate_mode = gate_mode
         self.filtration = LearnedFiltration(eqv_features, hidden_dim,
@@ -1007,7 +1015,7 @@ class TopologyLayer(nn.Module):
         self.ph = DifferentiablePH(max_ph_dim, num_stats,
                                    multiplicity=multiplicity,
                                    scale_stats=scale_stats,
-                                   essential=essential)
+                                   essential=essential, static=static)
 
         topo_dim = self.ph.out_features            # per-head graph-level width
         node_dim = self.ph.node_out_features       # per-head node-level width

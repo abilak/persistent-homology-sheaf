@@ -38,8 +38,23 @@ class DataGenerator:
             self.load_qm9_data()
         else:
             self.load_data_benchmark()
+        if getattr(self.config.architecture, 'structure_only', False):
+            self._drop_node_features()
 
         self.split_val_test_to_batches()
+
+    def _drop_node_features(self):
+        """structure-only runs (as in TOGL): keep only channel 0 (adjacency),
+        i.e. remove all node labels; the model then gets node_labels = 0."""
+        def strip(gs):
+            out = np.empty(len(gs), dtype=object)
+            for i, g in enumerate(gs):
+                out[i] = np.ascontiguousarray(g[:1])
+            return out
+        self.train_graphs = strip(self.train_graphs)
+        self.val_graphs = strip(self.val_graphs)
+        if getattr(self, 'test_graphs', None) is not None:
+            self.test_graphs = strip(self.test_graphs)
 
     # ogbg-molhiv, OGB scaffold split (classification; metric ROC-AUC)
     def load_molhiv_data(self):
