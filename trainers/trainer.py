@@ -23,6 +23,17 @@ def _host(x):
         return float(x) if x.numel() == 1 else x.numpy()
     return x
 
+def _slice_batch(graphs, a, b):
+    """rows a:b of a (possibly padded) batch tensor, with its host-side
+    attributes (adjacency copy, real sizes, node mask) sliced alongside"""
+    g = graphs[a:b]
+    for attr in ('_host_adj', '_n_real', '_node_mask'):
+        v = getattr(graphs, attr, None)
+        if v is not None:
+            setattr(g, attr, v[a:b])
+    return g
+
+
 class WeightEMA:
     """Exponential moving average of the model parameters, used for
     evaluation only (training updates the raw parameters as usual):
@@ -170,10 +181,23 @@ class Trainer(object):
         :return: tuple of (loss, num_correct_labels or distances_array)
         """
         graphs, labels = self.data_loader.next_batch()
-        loss, correct_labels_or_distances = self.model_wrapper.run_model_get_loss_and_results(graphs, labels)
-
+        mb = int(getattr(self.config.hyperparams, 'micro_batch', 0) or 0)
         self.optimizer.zero_grad()
-        loss.backward()
+        if mb and graphs.shape[0] > mb:
+            # micro-batching: the loss is a SUM over graphs and the model has
+            # no batch-statistics layer, so accumulating the chunks' gradients
+            # gives exactly the full-batch gradient, at a fraction of the
+            # activation memory
+            loss, correct_labels_or_distances = 0.0, 0.0
+            for s in range(0, graphs.shape[0], mb):
+                l, r = self.model_wrapper.run_model_get_loss_and_results(
+                    _slice_batch(graphs, s, s + mb), labels[s:s + mb])
+                l.backward()
+                loss = loss + l.detach()
+                correct_labels_or_distances = correct_labels_or_distances + r
+        else:
+            loss, correct_labels_or_distances = self.model_wrapper.run_model_get_loss_and_results(graphs, labels)
+            loss.backward()
         self.optimizer.step()
         if self.ema is not None:
             self.ema.update()

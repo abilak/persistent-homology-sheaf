@@ -61,7 +61,7 @@ def build_config(dataset, model_type, overrides=None):
     # optional fair hyperparameter overrides (applied to BOTH baseline & topo)
     if overrides:
         for k, v in overrides.items():
-            if k in ('learning_rate', 'decay_rate', 'batch_size'):
+            if k in ('learning_rate', 'decay_rate', 'batch_size', 'micro_batch'):
                 cfg.hyperparams[k] = v
             elif k == 'num_epochs':
                 cfg.num_epochs = int(v)

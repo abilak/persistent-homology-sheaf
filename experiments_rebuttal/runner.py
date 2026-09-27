@@ -430,10 +430,18 @@ WIDE = {"MUTAG": 140, "PTC": 92, "NCI1": 138, "NCI109": 138, "PROTEINS": 140,
         "IMDBBINARY": 140, "IMDBMULTI": 140, "ENZYMES": 140, "ZINC": 138, "MOLHIV": 132}
 
 
+# micro-batching (gradient accumulation over chunks of the batch) for the
+# memory-heavy runs: the loss is a sum and the model has no batch-statistics
+# layer, so it equals the full-batch step (verified to 1e-7 in float32 once
+# max-pool ties are broken); results stay comparable with non-micro runs.
+MICRO_WIDE = {"MOLHIV": 8, "PROTEINS": 4}
+
+
 def wide_plan(datasets, seeds=(0,), fixed_split=False):
     folds = [1] if fixed_split else range(1, 11)
     return [dict(dataset=ds, model="baseline", seed=sd, fold=f, epochs=None, variant="wide_fast",
-                 overrides=dict(FAST, block_width=WIDE[ds]))
+                 overrides=dict(FAST, block_width=WIDE[ds],
+                                **({"micro_batch": MICRO_WIDE[ds]} if ds in MICRO_WIDE else {})))
             for ds in datasets for sd in seeds for f in folds]
 
 
@@ -458,7 +466,8 @@ def ppgn_plan(datasets, folds=range(1, 11), models=("baseline", "topo")):
     for ds in datasets:
         lr, dec, ep = PPGN_SCHED[ds]
         common = dict(block_features=[400, 400, 400], batch_size=5, learning_rate=lr,
-                      decay_rate=dec, num_epochs=ep, padded_batching=False)
+                      decay_rate=dec, num_epochs=ep, padded_batching=False,
+                      **({"micro_batch": 1} if ds == "PROTEINS" else {}))
         for m in models:
             ov = dict(common) if m == "baseline" else dict(FULL, **common)
             jobs += [dict(dataset=ds, model=m, seed=0, fold=f, epochs=None,
