@@ -421,6 +421,27 @@ def unpadded_plan(dataset, seed=0):
 
 for _ds in ["MUTAG", "PTC", "NCI1", "NCI109", "PROTEINS", "IMDBBINARY", "IMDBMULTI", "ENZYMES"]:
     PLANS["unpadded_" + _ds.lower()] = unpadded_plan(_ds)
+# Parameter-matched baseline: the equivariant backbone alone, widened until
+# its parameter count matches the full topology model on that dataset (so a
+# gain cannot be attributed to capacity). Widths from counting parameters of
+# BaseModel(build_config(...)): full-model count vs baseline count at width w.
+# Compare with:  compare_variant.py DS wide_fast   (read the full_fast row)
+WIDE = {"MUTAG": 140, "PTC": 92, "NCI1": 138, "NCI109": 138, "PROTEINS": 140,
+        "IMDBBINARY": 140, "IMDBMULTI": 140, "ENZYMES": 140, "ZINC": 138, "MOLHIV": 132}
+
+
+def wide_plan(datasets, seeds=(0,), fixed_split=False):
+    folds = [1] if fixed_split else range(1, 11)
+    return [dict(dataset=ds, model="baseline", seed=sd, fold=f, epochs=None, variant="wide_fast",
+                 overrides=dict(FAST, block_width=WIDE[ds]))
+            for ds in datasets for sd in seeds for f in folds]
+
+
+PLANS["wide_fast"] = wide_plan(["MUTAG", "PTC", "IMDBBINARY", "NCI1", "NCI109"])
+PLANS["wide_fast_proteins"] = wide_plan(["PROTEINS"])          # memory-heavy: 1 worker
+PLANS["wide_extra_tu_fast"] = wide_plan(["IMDBMULTI", "ENZYMES"])
+PLANS["wide_zinc_fast"] = wide_plan(["ZINC"], seeds=(0, 1, 2, 3), fixed_split=True)
+PLANS["wide_molhiv_fast"] = wide_plan(["MOLHIV"], seeds=(0, 1, 2, 3), fixed_split=True)
 # Weight averaging (EMA of the parameters, decay 0.99, used for evaluation):
 # the same plans with ema_decay added for EVERY model, baseline included.
 # Variant tags get "_ema" (baseline/fast_ema, topo/full_fast_ema, ...), so the
