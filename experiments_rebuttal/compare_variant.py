@@ -17,6 +17,9 @@ RESULTS = os.path.join(ROOT, "rebuttal_results")
 
 ds = sys.argv[1]
 base_variant = sys.argv[2] if len(sys.argv) > 2 else None
+if ds.upper() in ("ZINC", "MOLHIV", "QM9"):
+    sys.exit(f"{ds} is a fixed-split task (not 10-fold accuracy): use\n"
+             f"  python experiments_rebuttal/compare_fixed.py {ds.upper()}")
 
 pools = defaultdict(dict)
 for fp in glob.glob(os.path.join(RESULTS, ds, "*.json")):
