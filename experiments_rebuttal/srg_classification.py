@@ -62,12 +62,20 @@ SAFE_GATE = False   # set by --safe: topo uses a scalar gate initialized to 0,
                     # (SR pairs) and where the baseline already suffices (CSL).
 
 
+
+# the paper's model (Section 4): multiplicity, invertible normalization,
+# essential classes, bounded filtration, topological readout (= runner.FULL)
+FINAL_TOPO = dict(topo_multiplicity=True, topo_norm_stats=True, topo_essential=True,
+                  topo_filt_squash=True, topo_readout=True)
+
+
 def cfg(num_classes, model_type):
     arch = dict(block_features=[64, 64], depth_of_mlp=2, new_suffix=True,
                 use_topology=False, topo_hidden_dim=32, topo_max_ph_dim=2,
                 topo_num_stats=16, topo_max_simplex_dim=3)  # dim3 => 4-cliques
     if model_type == 'topo':
         arch['use_topology'] = True
+        arch.update(FINAL_TOPO)
         if SAFE_GATE:
             arch['topo_gate_mode'] = 'scalar'
             arch['topo_gate_init'] = 0.0

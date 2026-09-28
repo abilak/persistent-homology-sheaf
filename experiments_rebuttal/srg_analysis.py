@@ -61,8 +61,15 @@ def graph_to_input(G):
     return x
 
 
+
+# the paper's model (Section 4): multiplicity, invertible normalization,
+# essential classes, bounded filtration, topological readout (= runner.FULL)
+FINAL_TOPO = dict(topo_multiplicity=True, topo_norm_stats=True, topo_essential=True,
+                  topo_filt_squash=True, topo_readout=True)
+
+
 def make_config(use_topology):
-    return EasyDict({
+    cfg = EasyDict({
         "dataset_name": "SRG",
         "node_labels": 0,
         "num_classes": 2,
@@ -77,6 +84,9 @@ def make_config(use_topology):
             "topo_max_simplex_dim": 3,   # include tetrahedra (4-cliques)
         },
     })
+    if use_topology:
+        cfg.architecture.update(FINAL_TOPO)
+    return cfg
 
 
 def model_separation(G1, G2, use_topology, n_seeds=5):
