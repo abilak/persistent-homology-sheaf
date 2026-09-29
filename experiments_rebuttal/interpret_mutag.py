@@ -32,7 +32,9 @@ import run_job, runner
 import data_loader.data_helper as H
 from layers.topology import build_graph_structs
 
-OUT = "rebuttal_results/interpret_mutag"
+# --seed=N trains an independent model (training seed N) into its own directory
+SEED = next((int(s.split("=")[1]) for s in sys.argv if s.startswith("--seed=")), 0)
+OUT = "rebuttal_results/interpret_mutag" + (f"_seed{SEED}" if SEED else "")
 CKPT = os.path.join(OUT, "model.pt")
 os.makedirs(OUT, exist_ok=True)
 
@@ -47,7 +49,7 @@ def train(epochs=None):
     from data_loader.data_generator import DataGenerator
     from models.model_wrapper import ModelWrapper
     from trainers.trainer import Trainer
-    torch.manual_seed(0); np.random.seed(0)
+    torch.manual_seed(SEED); np.random.seed(SEED)
     cfg = config()
     if epochs:
         cfg.num_epochs = epochs
@@ -65,7 +67,7 @@ def train(epochs=None):
 
 def load_model(trained=True):
     from models.base_model import BaseModel
-    torch.manual_seed(0)
+    torch.manual_seed(SEED)
     model = BaseModel(config())
     info = {}
     if trained:
@@ -95,6 +97,44 @@ def molecule(g):
         for a, b in zip(cyc, cyc[1:] + cyc[:1]):
             ring.add(tuple(sorted((a, b))))
     return G, atype, ring
+
+
+def diagram(f):
+    """persistence of the max-corrected filtration, with the birth/death simplices"""
+    import gudhi
+    st = gudhi.SimplexTree()
+    for s in f:                                  # gudhi's insert lowers existing faces to the new
+        st.insert(list(s))                       # value, so assign the learned values afterwards
+    for s, v in f.items():
+        st.assign_filtration(list(s), v)
+    st.make_filtration_non_decreasing()
+    st.compute_persistence(persistence_dim_max=True)
+    out = []
+    for b, d in st.persistence_pairs():
+        fb = st.filtration(b); fd = st.filtration(d) if d else float("inf")
+        out.append((len(b) - 1, fb, fd, tuple(sorted(b)), tuple(sorted(d)) if d else None))
+    return out
+
+
+def class_stats(graphs, labels, per_mol):
+    """per-molecule diagram summaries vs the mutagenicity label"""
+    y = np.asarray(labels)
+    rows, births = [], []
+    for (gi, G, atype, ring, f) in per_mol:
+        dg = diagram(f)
+        fin0 = [(d - b, s) for dim, b, d, s, _ in dg if dim == 0 and np.isfinite(d) and d - b > 1e-6]
+        ess1 = sum(1 for dim, b, d, *_ in dg if dim == 1 and not np.isfinite(d))
+        births += [elem(atype[s[0]]) for _, s in fin0]
+        rows.append((len(fin0), max([p for p, _ in fin0], default=0.0), ess1))
+    R = np.array(rows, float)
+    out = {}
+    for j, name in enumerate(["finite_H0_pairs", "max_H0_persistence", "essential_H1_rings"]):
+        a, b = R[y == 1, j], R[y != 1, j]
+        out[name] = dict(mean_mutagenic=round(float(a.mean()), 3), mean_nonmutagenic=round(float(b.mean()), 3),
+                         auroc_mutagenic=round(auroc(a, b), 3))
+    out["finite_H0_birth_element"] = {e: births.count(e) for e in sorted(set(births))}
+    out["finite_H0_born_at_heteroatom"] = round(1 - births.count("C") / max(len(births), 1), 3)
+    return out
 
 
 def auroc(pos, neg):
@@ -194,13 +234,7 @@ def figures(per_mol, nodes, edges, carbon, labels):
                                 font_size=7, font_color="w", ax=ax[0])
         fig.colorbar(nh, ax=ax[0], label="learned filtration")
         ax[0].set_title(f"molecule {gi} (class {int(labels[gi])})"); ax[0].axis("off")
-        st = gudhi.SimplexTree()
-        for s in f:                                  # gudhi's insert lowers existing faces to the new
-            st.insert(list(s))                       # value, so assign the learned values afterwards
-        for s, v in f.items():
-            st.assign_filtration(list(s), v)
-        st.make_filtration_non_decreasing()
-        dg = st.persistence(persistence_dim_max=True)
+        dg = [(dim, (b, d)) for dim, b, d, *_ in diagram(f)]
         top = max(allv) + 0.1 * (vmax - vmin + 1e-9)
         for dim, col, mk in [(0, "tab:blue", "o"), (1, "tab:orange", "s")]:
             fin = np.array([[b, d] for dd, (b, d) in dg if dd == dim and np.isfinite(d)])
@@ -215,6 +249,54 @@ def figures(per_mol, nodes, edges, carbon, labels):
         ax[1].set_xlabel("birth"); ax[1].set_ylabel("death (top line: essential)")
         ax[1].set_title("persistence diagram"); ax[1].legend(fontsize=7)
         plt.tight_layout(); plt.savefig(f"{OUT}/molecule_{gi}.png", dpi=160); plt.close()
+
+
+def main_figure(per_mol, labels, gi=130):
+    """compact two-panel figure for the main text: one molecule and its annotated diagram"""
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    m = [x for x in per_mol if x[0] == gi]
+    if not m:
+        return
+    _, G, atype, ring, f = m[0]
+    pos = nx.kamada_kawai_layout(G)
+    fig, ax = plt.subplots(1, 2, figsize=(6.6, 2.6), gridspec_kw=dict(width_ratios=[1.15, 1]))
+    allv = [f[(v,)] for v in G.nodes()] + [f[tuple(sorted(e))] for e in G.edges()]
+    vmin, vmax = min(allv), max(allv)
+    nx.draw_networkx_edges(G, pos, ax=ax[0], edgelist=[e for e in G.edges() if tuple(sorted(e)) in ring],
+                           width=6, edge_color="k", alpha=.18)
+    nx.draw_networkx_edges(G, pos, ax=ax[0], edge_color=[f[tuple(sorted(e))] for e in G.edges()],
+                           edge_cmap=plt.cm.viridis, edge_vmin=vmin, edge_vmax=vmax, width=2.5)
+    nh = nx.draw_networkx_nodes(G, pos, ax=ax[0], node_color=[f[(v,)] for v in G.nodes()],
+                                cmap=plt.cm.viridis, vmin=vmin, vmax=vmax, node_size=150)
+    nx.draw_networkx_labels(G, pos, {v: elem(atype[v]) for v in G.nodes()}, font_size=6.5,
+                            font_color="w", ax=ax[0])
+    cb = fig.colorbar(nh, ax=ax[0], fraction=0.05, pad=0.02); cb.ax.tick_params(labelsize=6)
+    cb.set_label("learned filtration", fontsize=7)
+    ax[0].axis("off")
+    dg = diagram(f)
+    top = vmax + 0.12 * (vmax - vmin)
+    grp = {}
+    for dim, b, d, s, _ in dg:
+        if dim > 1 or (np.isfinite(d) and d - b <= 1e-6):
+            continue
+        lab = ("$H_0$ " + ("comp. born at " + elem(atype[s[0]]) if np.isfinite(d) else "essential")) if dim == 0 \
+            else "$H_1$ " + ("essential (ring)" if not np.isfinite(d) else "finite")
+        grp.setdefault(lab, []).append((b, d if np.isfinite(d) else top))
+    style = {0: ("o", "tab:blue"), 1: ("s", "tab:orange")}
+    mk = ["o", "^", "D", "v", "P"]
+    for k, (lab, pts) in enumerate(sorted(grp.items())):
+        pts = np.array(pts); dim = 1 if lab.startswith("$H_1") else 0
+        ess = "essential" in lab
+        ax[1].scatter(pts[:, 0], pts[:, 1], marker="s" if dim else mk[k % len(mk)], s=34,
+                      facecolors="none" if ess else style[dim][1], edgecolors=style[dim][1] if ess else "k",
+                      linewidths=.8, label=f"{lab} ($\\times${len(pts)})")
+    lim = [vmin - .03, top + .03]
+    ax[1].plot(lim, lim, "k--", lw=.5); ax[1].axhline(top, color="gray", lw=.4)
+    ax[1].set_xlim(lim); ax[1].set_ylim(lim)
+    ax[1].set_xlabel("birth", fontsize=7); ax[1].set_ylabel("death (top line: essential)", fontsize=7)
+    ax[1].tick_params(labelsize=6); ax[1].legend(fontsize=5.5, loc="lower right", frameon=False)
+    plt.tight_layout(); plt.savefig(f"{OUT}/main_molecule_{gi}.pdf"); plt.close()
 
 
 def main():
@@ -232,11 +314,14 @@ def main():
     model, info = load_model(trained=True)
     stats, per_mol, nodes, edges = analyze(model, graphs, carbon)
     init_model, _ = load_model(trained=False)
-    init_stats, *_ = analyze(init_model, graphs, carbon)
+    stats["by_class"] = class_stats(graphs, labels, per_mol)
+    init_stats, init_mol, *_ = analyze(init_model, graphs, carbon)
+    init_stats["by_class"] = class_stats(graphs, labels, init_mol)
     res = dict(model=info, carbon_label=carbon, trained=stats, untrained_control=init_stats)
     json.dump(res, open(f"{OUT}/stats.json", "w"), indent=2)
     print(json.dumps(res, indent=2))
     figures(per_mol, nodes, edges, carbon, labels)
+    main_figure(per_mol, labels)
     print(f"figures and stats in {OUT}/")
 
 

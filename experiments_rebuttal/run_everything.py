@@ -81,6 +81,9 @@ def expressivity_jobs():
     jobs = [
         script_job("interpret_mutag", ["experiments_rebuttal/interpret_mutag.py"],
                    "rebuttal_results/interpret_mutag/stats.json"),
+        # two more training seeds: is the learned chemical ordering reproducible?
+        *[script_job(f"interpret_mutag_seed{s}", ["experiments_rebuttal/interpret_mutag.py", f"--seed={s}"],
+                     f"rebuttal_results/interpret_mutag_seed{s}/stats.json") for s in (1, 2)],
         # strongly regular pairs, final model at D = 3, P = 2
         script_job("srg_analysis", ["experiments_rebuttal/srg_analysis.py"],
                    os.path.join(EXPR, "srg_analysis.done"), copy="experiments_rebuttal/srg_results.json"),
