@@ -2,7 +2,8 @@
 Run EVERY remaining experiment of the paper (all but ogbg-molhiv) from ONE
 queue, then the timing benchmark:
 
-    systemd-run --user --scope -p MemoryMax=12G python experiments_rebuttal/run_everything.py 3
+    systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 -p OOMPolicy=continue \
+        python experiments_rebuttal/run_everything.py 3 < /dev/null
 
 One scheduler instead of a chain of plans: workers never sit idle at the end
 of a plan, and per-group caps keep memory-heavy jobs from running together
@@ -179,7 +180,13 @@ def main():
     say("=== run_everything start")
     if not DRY:
         fetch_brec()
-    jobs = expressivity_jobs() + plan_jobs(MAIN_PLANS) + plan_jobs(STUDY_PLANS)
+    # the long expressivity runs (SR classification, BREC) go last: the paper tables come first,
+    # and on a machine short of memory the long runs should not hold slots for hours
+    expr = expressivity_jobs()
+    LONG = ("srg_classification", "brec_")
+    quick = [j for j in expr if not j["name"].startswith(LONG)]
+    long_ = [j for j in expr if j["name"].startswith(LONG)]
+    jobs = quick + plan_jobs(MAIN_PLANS) + plan_jobs(STUDY_PLANS) + long_
     if DRY:
         todo = [j for j in jobs if not os.path.exists(j["done"])]
         by = {}
