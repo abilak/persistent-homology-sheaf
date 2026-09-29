@@ -309,6 +309,7 @@ def main_figure(per_mol, labels, gi=130):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--no-train", action="store_true")
     ap.add_argument("--epochs", type=int, default=None, help="default: the dataset schedule (200)")
+    ap.add_argument("--seed", type=int, default=0, help="training seed; nonzero -> interpret_mutag_seed<N>/")
     args = ap.parse_args()
     if not args.no_train or not os.path.exists(CKPT):
         train(args.epochs)
