@@ -272,7 +272,7 @@ def main_figure(per_mol, labels, gi=130):
         return
     _, G, atype, ring, f = m[0]
     pos = nx.kamada_kawai_layout(G)
-    fig, ax = plt.subplots(1, 2, figsize=(3.45, 1.75), gridspec_kw=dict(width_ratios=[1.05, 1]))  # one column
+    fig, ax = plt.subplots(1, 2, figsize=(3.45, 1.4), gridspec_kw=dict(width_ratios=[1.05, 1]))  # one column
     allv = [f[(v,)] for v in G.nodes()] + [f[tuple(sorted(e))] for e in G.edges()]
     vmin, vmax = min(allv), max(allv)
     nx.draw_networkx_edges(G, pos, ax=ax[0], edgelist=[e for e in G.edges() if tuple(sorted(e)) in ring],
