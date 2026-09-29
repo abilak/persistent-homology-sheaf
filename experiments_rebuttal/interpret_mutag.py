@@ -119,12 +119,14 @@ def diagram(f):
 def class_stats(graphs, labels, per_mol):
     """per-molecule diagram summaries vs the mutagenicity label"""
     y = np.asarray(labels)
-    rows, births = [], []
+    rows, births, pers, ess_het = [], [], [], 0
     for (gi, G, atype, ring, f) in per_mol:
         dg = diagram(f)
         fin0 = [(d - b, s) for dim, b, d, s, _ in dg if dim == 0 and np.isfinite(d) and d - b > 1e-6]
         ess1 = sum(1 for dim, b, d, *_ in dg if dim == 1 and not np.isfinite(d))
         births += [elem(atype[s[0]]) for _, s in fin0]
+        pers += [p for p, _ in fin0]
+        ess_het += sum(1 for dim, b, d, s, _ in dg if dim == 0 and not np.isfinite(d) and elem(atype[s[0]]) != "C")
         rows.append((len(fin0), max([p for p, _ in fin0], default=0.0), ess1))
     R = np.array(rows, float)
     out = {}
@@ -134,6 +136,11 @@ def class_stats(graphs, labels, per_mol):
                          auroc_mutagenic=round(auroc(a, b), 3))
     out["finite_H0_birth_element"] = {e: births.count(e) for e in sorted(set(births))}
     out["finite_H0_born_at_heteroatom"] = round(1 - births.count("C") / max(len(births), 1), 3)
+    het = np.array([p for p, e in zip(pers, births) if e != "C"]); car = np.array([p for p, e in zip(pers, births) if e == "C"])
+    out["H0_persistence_mean_heteroatom_born"] = round(float(het.mean()), 4) if len(het) else None
+    out["H0_persistence_mean_carbon_born"] = round(float(car.mean()), 4) if len(car) else None
+    out["H0_persistence_share_heteroatom_born"] = round(float(het.sum() / (het.sum() + car.sum())), 3)
+    out["essential_H0_born_at_heteroatom"] = f"{ess_het}/{len(per_mol)}"
     return out
 
 
