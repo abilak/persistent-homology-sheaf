@@ -280,7 +280,7 @@ def main_figure(per_mol, labels, gi=130):
     for dim, b, d, s, _ in dg:
         if dim > 1 or (np.isfinite(d) and d - b <= 1e-6):
             continue
-        lab = ("$H_0$ " + ("comp. born at " + elem(atype[s[0]]) if np.isfinite(d) else "essential")) if dim == 0 \
+        lab = ("$H_0$ " + (("comp. born at " if np.isfinite(d) else "essential, born at ") + elem(atype[s[0]]))) if dim == 0 \
             else "$H_1$ " + ("essential (ring)" if not np.isfinite(d) else "finite")
         grp.setdefault(lab, []).append((b, d if np.isfinite(d) else top))
     style = {0: ("o", "tab:blue"), 1: ("s", "tab:orange")}
