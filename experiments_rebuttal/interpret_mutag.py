@@ -34,7 +34,10 @@ from layers.topology import build_graph_structs
 
 # --seed=N trains an independent model (training seed N) into its own directory
 SEED = next((int(s.split("=")[1]) for s in sys.argv if s.startswith("--seed=")), 0)
-OUT = "rebuttal_results/interpret_mutag" + (f"_seed{SEED}" if SEED else "")
+# --final analyzes the weights after the last epoch instead of the best-validation epoch
+# (fold 1 has only 18 validation molecules, so the best epoch can be very early)
+FINAL = "--final" in sys.argv
+OUT = "rebuttal_results/interpret_mutag" + (f"_seed{SEED}" if SEED else "") + ("_final" if FINAL else "")
 CKPT = os.path.join(OUT, "model.pt")
 os.makedirs(OUT, exist_ok=True)
 
@@ -61,7 +64,9 @@ def train(epochs=None):
         if va > best:
             best, best_ep = float(va), ep
             best_state = {k: v.detach().cpu().clone() for k, v in mw.model.state_dict().items()}
-    torch.save(dict(state_dict=best_state, best_val=best, best_epoch=best_ep), CKPT)
+    final_state = {k: v.detach().cpu().clone() for k, v in mw.model.state_dict().items()}
+    torch.save(dict(state_dict=final_state if FINAL else best_state, best_val=best, best_epoch=best_ep,
+                    final_val=float(va), final_epoch=cfg.num_epochs - 1, weights="final" if FINAL else "best"), CKPT)
     print(f"trained: best fold-1 validation accuracy {best:.4f} at epoch {best_ep}")
 
 
@@ -73,7 +78,7 @@ def load_model(trained=True):
     if trained:
         ck = torch.load(CKPT, map_location="cpu")
         model.load_state_dict(ck["state_dict"])
-        info = dict(best_val=ck["best_val"], best_epoch=ck["best_epoch"])
+        info = {k: ck[k] for k in ("weights", "best_val", "best_epoch", "final_val", "final_epoch") if k in ck}
     return model.eval(), info
 
 
@@ -310,6 +315,7 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--no-train", action="store_true")
     ap.add_argument("--epochs", type=int, default=None, help="default: the dataset schedule (200)")
     ap.add_argument("--seed", type=int, default=0, help="training seed; nonzero -> interpret_mutag_seed<N>/")
+    ap.add_argument("--final", action="store_true", help="analyze last-epoch weights -> ..._final/")
     args = ap.parse_args()
     if not args.no_train or not os.path.exists(CKPT):
         train(args.epochs)
