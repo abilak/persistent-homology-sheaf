@@ -105,6 +105,16 @@ def auroc(pos, neg):
     return float((r[:len(pos)].sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
+# MUTAG atom counts over all 188 molecules: C 2395, O 593, N 345, I 23, Cl 12, Br 2, F 1 (all distinct),
+# so the element of each integer label is recovered from its count
+MUTAG_COUNTS = {2395: "C", 593: "O", 345: "N", 23: "I", 12: "Cl", 2: "Br", 1: "F"}
+ELEM = {}
+
+
+def elem(a):
+    return ELEM.get(int(a), str(int(a)))
+
+
 def analyze(model, graphs, carbon):
     per_mol, nodes, edges = [], [], []
     for gi, g in enumerate(graphs):
@@ -115,7 +125,7 @@ def analyze(model, graphs, carbon):
         for a, b in G.edges():
             e = tuple(sorted((a, b)))
             cc = atype[a] == carbon and atype[b] == carbon
-            edges.append((gi, f[e], e in ring, cc))
+            edges.append((gi, f[e], e in ring, cc, *sorted((int(atype[a]), int(atype[b])))))
         per_mol.append((gi, G, atype, ring, f))
     nodes = np.array(nodes, dtype=float); edges = np.array(edges, dtype=float)
     ef, er, ecc, emol = edges[:, 1], edges[:, 2] > 0, edges[:, 3] > 0, edges[:, 0].astype(int)
@@ -134,11 +144,17 @@ def analyze(model, graphs, carbon):
                     auroc=round(auroc(pos, neg), 4),
                     auroc_ci95=[round(float(np.percentile(boots, 2.5)), 4), round(float(np.percentile(boots, 97.5)), 4)],
                     n_ring=int(len(pos)), n_nonring=int(len(neg)))
+    btype = ["-".join(sorted((elem(x), elem(y)))) for x, y in edges[:, 4:6].astype(int)]
+    types = {t: [float(v) for v, u in zip(ef, btype) if u == t] for t in set(btype)}
+    no = np.array(types.get("N-O", [])); rest = np.array([v for v, u in zip(ef, btype) if u != "N-O"])
     stats = dict(
+        bond_type_mean={t: dict(n=len(v), mean=round(float(np.mean(v)), 4))
+                        for t, v in sorted(types.items(), key=lambda kv: -len(kv[1]))},
+        p_NO_below_other_bond=round(1 - auroc(no, rest), 4) if len(no) and len(rest) else None,
         all_bonds=ring_stats(np.ones_like(er)),
         carbon_carbon_bonds=ring_stats(ecc),
         vertex_degree_pearson=round(float(np.corrcoef(nodes[:, 1], nodes[:, 2])[0, 1]), 4),
-        vertex_mean_by_label={str(int(a)) + ("=C" if int(a) == carbon else ""):
+        vertex_mean_by_element={elem(a):
                               round(float(nodes[nodes[:, 3] == a, 1].mean()), 4)
                               for a in np.unique(nodes[:, 3])},
     )
@@ -174,13 +190,15 @@ def figures(per_mol, nodes, edges, carbon, labels):
                                     edge_vmin=vmin, edge_vmax=vmax, width=3)
         nh = nx.draw_networkx_nodes(G, pos, ax=ax[0], node_color=[f[(v,)] for v in G.nodes()],
                                     cmap=plt.cm.viridis, vmin=vmin, vmax=vmax, node_size=160)
-        nx.draw_networkx_labels(G, pos, {v: ("C" if atype[v] == carbon else f"{int(atype[v])}") for v in G.nodes()},
+        nx.draw_networkx_labels(G, pos, {v: elem(atype[v]) for v in G.nodes()},
                                 font_size=7, font_color="w", ax=ax[0])
         fig.colorbar(nh, ax=ax[0], label="learned filtration")
         ax[0].set_title(f"molecule {gi} (class {int(labels[gi])})"); ax[0].axis("off")
         st = gudhi.SimplexTree()
+        for s in f:                                  # gudhi's insert lowers existing faces to the new
+            st.insert(list(s))                       # value, so assign the learned values afterwards
         for s, v in f.items():
-            st.insert(list(s), filtration=v)
+            st.assign_filtration(list(s), v)
         st.make_filtration_non_decreasing()
         dg = st.persistence(persistence_dim_max=True)
         top = max(allv) + 0.1 * (vmax - vmin + 1e-9)
@@ -208,6 +226,9 @@ def main():
     graphs, labels = H.load_dataset("MUTAG")
     lab = np.concatenate([g[1:].diagonal(axis1=1, axis2=2).argmax(0) for g in graphs])
     carbon = int(np.bincount(lab).argmax())          # most frequent label = carbon
+    cnt = np.bincount(lab)
+    if sorted(cnt[cnt > 0]) == sorted(MUTAG_COUNTS):
+        ELEM.update({a: MUTAG_COUNTS[int(c)] for a, c in enumerate(cnt) if c})
     model, info = load_model(trained=True)
     stats, per_mol, nodes, edges = analyze(model, graphs, carbon)
     init_model, _ = load_model(trained=False)
