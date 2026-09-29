@@ -272,19 +272,19 @@ def main_figure(per_mol, labels, gi=130):
         return
     _, G, atype, ring, f = m[0]
     pos = nx.kamada_kawai_layout(G)
-    fig, ax = plt.subplots(1, 2, figsize=(6.6, 2.6), gridspec_kw=dict(width_ratios=[1.15, 1]))
+    fig, ax = plt.subplots(1, 2, figsize=(3.45, 1.75), gridspec_kw=dict(width_ratios=[1.05, 1]))  # one column
     allv = [f[(v,)] for v in G.nodes()] + [f[tuple(sorted(e))] for e in G.edges()]
     vmin, vmax = min(allv), max(allv)
     nx.draw_networkx_edges(G, pos, ax=ax[0], edgelist=[e for e in G.edges() if tuple(sorted(e)) in ring],
-                           width=6, edge_color="k", alpha=.18)
+                           width=4, edge_color="k", alpha=.18)
     nx.draw_networkx_edges(G, pos, ax=ax[0], edge_color=[f[tuple(sorted(e))] for e in G.edges()],
-                           edge_cmap=plt.cm.viridis, edge_vmin=vmin, edge_vmax=vmax, width=2.5)
+                           edge_cmap=plt.cm.viridis, edge_vmin=vmin, edge_vmax=vmax, width=1.6)
     nh = nx.draw_networkx_nodes(G, pos, ax=ax[0], node_color=[f[(v,)] for v in G.nodes()],
-                                cmap=plt.cm.viridis, vmin=vmin, vmax=vmax, node_size=150)
-    nx.draw_networkx_labels(G, pos, {v: elem(atype[v]) for v in G.nodes()}, font_size=6.5,
+                                cmap=plt.cm.viridis, vmin=vmin, vmax=vmax, node_size=58)
+    nx.draw_networkx_labels(G, pos, {v: elem(atype[v]) for v in G.nodes()}, font_size=4,
                             font_color="w", ax=ax[0])
-    cb = fig.colorbar(nh, ax=ax[0], fraction=0.05, pad=0.02); cb.ax.tick_params(labelsize=6)
-    cb.set_label("learned filtration", fontsize=7)
+    cb = fig.colorbar(nh, ax=ax[0], fraction=0.05, pad=0.01); cb.ax.tick_params(labelsize=4.5, length=2)
+    cb.set_label("learned filtration", fontsize=5, labelpad=1)
     ax[0].axis("off")
     dg = diagram(f)
     top = vmax + 0.12 * (vmax - vmin)
@@ -300,15 +300,16 @@ def main_figure(per_mol, labels, gi=130):
     for k, (lab, pts) in enumerate(sorted(grp.items())):
         pts = np.array(pts); dim = 1 if lab.startswith("$H_1") else 0
         ess = "essential" in lab
-        ax[1].scatter(pts[:, 0], pts[:, 1], marker="s" if dim else mk[k % len(mk)], s=34,
+        ax[1].scatter(pts[:, 0], pts[:, 1], marker="s" if dim else mk[k % len(mk)], s=14,
                       facecolors="none" if ess else style[dim][1], edgecolors=style[dim][1] if ess else "k",
-                      linewidths=.8, label=f"{lab} ($\\times${len(pts)})")
+                      linewidths=.6, label=f"{lab} ($\\times${len(pts)})")
     lim = [vmin - .03, top + .03]
     ax[1].plot(lim, lim, "k--", lw=.5); ax[1].axhline(top, color="gray", lw=.4)
     ax[1].set_xlim(lim); ax[1].set_ylim(lim)
-    ax[1].set_xlabel("birth", fontsize=7); ax[1].set_ylabel("death (top line: essential)", fontsize=7)
-    ax[1].tick_params(labelsize=6); ax[1].legend(fontsize=5.5, loc="lower right", frameon=False)
-    plt.tight_layout(); plt.savefig(f"{OUT}/main_molecule_{gi}.pdf"); plt.close()
+    ax[1].set_xlabel("birth", fontsize=5, labelpad=1); ax[1].set_ylabel("death (top: essential)", fontsize=5, labelpad=1)
+    ax[1].tick_params(labelsize=4.5, length=2, pad=1)
+    ax[1].legend(fontsize=3.8, loc="lower right", frameon=False, handletextpad=0.2, borderaxespad=0.2, labelspacing=0.3)
+    plt.tight_layout(pad=0.2, w_pad=0.4); plt.savefig(f"{OUT}/main_molecule_{gi}.pdf"); plt.close()
 
 
 def main():
