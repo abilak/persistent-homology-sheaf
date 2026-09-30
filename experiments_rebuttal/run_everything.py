@@ -28,6 +28,11 @@ PY = os.environ.get("PY", sys.executable)
 ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
 WORKERS = int(ARGS[0]) if ARGS else 3
 DRY = "--dry" in sys.argv
+# --skip=name1,name2: drop plans / scripts whose name starts with any of these
+#   e.g. --skip=brec_,srg_classification,ablation_min_fast,zinc_ablation_fast
+SKIP = tuple(s for a in sys.argv if a.startswith("--skip=") for s in a[7:].split(",") if s)
+# --timing-first: run the timing benchmark (alone on the GPU) before the queue
+TIMING_FIRST = "--timing-first" in sys.argv
 CAPS = {"proteins": 1, "brec": 1}
 EXPR = os.path.join("rebuttal_results", "expr_final")
 BREC_OUT = os.path.join("rebuttal_results", "brec_final")
@@ -187,6 +192,9 @@ def main():
     quick = [j for j in expr if not j["name"].startswith(LONG)]
     long_ = [j for j in expr if j["name"].startswith(LONG)]
     jobs = quick + plan_jobs(MAIN_PLANS) + plan_jobs(STUDY_PLANS) + long_
+    if SKIP:
+        jobs = [j for j in jobs if not j["name"].split(":")[0].startswith(SKIP)]
+        say(f"skipping {SKIP}")
     if DRY:
         todo = [j for j in jobs if not os.path.exists(j["done"])]
         by = {}
@@ -196,11 +204,14 @@ def main():
         say(f"DRY RUN: {len(jobs)} jobs, {len(todo)} to run; per plan/script: {by}")
         say(f"groups: proteins {sum(j['group'] == 'proteins' for j in todo)}, brec {sum(j['group'] == 'brec' for j in todo)}")
         return
-    run_queue(jobs, WORKERS, CAPS)
-    # timing last, alone on the GPU (molhiv excluded)
+    # timing alone on the GPU (molhiv excluded): last by default, or first with --timing-first
     tjob = script_job("timing", ["experiments_rebuttal/timing.py", "NCI1", "MUTAG", "PROTEINS", "IMDBBINARY", "ZINC"],
                       os.path.join(EXPR, "timing.done"))
-    run_queue([tjob], 1, {})
+    if TIMING_FIRST:
+        run_queue([tjob], 1, {})
+    run_queue(jobs, WORKERS, CAPS)
+    if not TIMING_FIRST:
+        run_queue([tjob], 1, {})
     say("=== all done. Tables: python experiments_rebuttal/paper_tables.py")
 
 
