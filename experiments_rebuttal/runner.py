@@ -537,6 +537,9 @@ PLANS["static_fast"] = [dict(dataset=ds, model="topo", seed=0, fold=f, epochs=No
                         for ds in ["MUTAG", "PTC", "IMDBBINARY", "NCI1", "NCI109"] for f in range(1, 11)]
 PLANS["static_fast_proteins"] = [dict(dataset="PROTEINS", model="topo", seed=0, fold=f, epochs=None,
                                       variant="full_static_fast", overrides=dict(STATIC)) for f in range(1, 11)]
+PLANS["static_extra_tu_fast"] = [dict(dataset=ds, model="topo", seed=0, fold=f, epochs=None,
+                                      variant="full_static_fast", overrides=dict(STATIC))
+                                 for ds in ["ENZYMES", "IMDBMULTI"] for f in range(1, 11)]
 PLANS["static_zinc_fast_s10"] = [dict(dataset="ZINC", model="topo", seed=sd, fold=1, epochs=None,
                                       variant="full_static_fast", overrides=dict(STATIC)) for sd in range(10)]
 

@@ -51,7 +51,7 @@ MAIN_PLANS = [  # main tables (no molhiv)
     "core_fast", "extra_tu_fast", "zinc_fast_s10",
     "wide_fast", "wide_extra_tu_fast", "wide_zinc_fast_s10", "wide_fast_proteins",
     "mp_fast", "mp_zinc_fast_s10",
-    "static_fast", "static_zinc_fast_s10", "static_fast_proteins"]
+    "static_fast", "static_zinc_fast_s10", "static_fast_proteins", "static_extra_tu_fast"]
 STUDY_PLANS = [  # appendix studies
     "structure_fast", "structure_fast_proteins", "placement_fast", "placement_zinc_fast_s10",
     "ablation_min_fast", "zinc_ablation_fast",
