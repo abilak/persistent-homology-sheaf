@@ -213,10 +213,19 @@ def analyze(model, graphs, carbon):
     return stats, per_mol, nodes, edges
 
 
+def _paper_style():
+    """plain figure style matching the paper (serif text, thin lines, no titles)"""
+    import matplotlib
+    matplotlib.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman", "Times", "STIXGeneral", "DejaVu Serif"],
+                                "mathtext.fontset": "stix", "font.size": 8, "axes.linewidth": 0.6,
+                                "axes.spines.top": False, "axes.spines.right": False,
+                                "xtick.major.width": 0.6, "ytick.major.width": 0.6, "legend.frameon": False})
+
+
 def figures(per_mol, nodes, edges, carbon, labels):
     import matplotlib; matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import gudhi
+    _paper_style()
     ef, er = edges[:, 1], edges[:, 2] > 0
     plt.figure(figsize=(4, 3))
     plt.hist([ef[~er], ef[er]], bins=30, label=["other bonds", "ring bonds"], density=True, alpha=.8)
@@ -245,7 +254,7 @@ def figures(per_mol, nodes, edges, carbon, labels):
         nx.draw_networkx_labels(G, pos, {v: elem(atype[v]) for v in G.nodes()},
                                 font_size=7, font_color="w", ax=ax[0])
         fig.colorbar(nh, ax=ax[0], label="learned filtration")
-        ax[0].set_title(f"molecule {gi} (class {int(labels[gi])})"); ax[0].axis("off")
+        ax[0].axis("off")
         dg = [(dim, (b, d)) for dim, b, d, *_ in diagram(f)]
         top = max(allv) + 0.1 * (vmax - vmin + 1e-9)
         for dim, col, mk in [(0, "tab:blue", "o"), (1, "tab:orange", "s")]:
@@ -259,7 +268,7 @@ def figures(per_mol, nodes, edges, carbon, labels):
         lim = [vmin - .05, top + .05]
         ax[1].plot(lim, lim, "k--", lw=.6); ax[1].axhline(top, color="gray", lw=.4)
         ax[1].set_xlabel("birth"); ax[1].set_ylabel("death (top line: essential)")
-        ax[1].set_title("persistence diagram"); ax[1].legend(fontsize=7)
+        ax[1].legend(fontsize=7)
         plt.tight_layout(); plt.savefig(f"{OUT}/molecule_{gi}.png", dpi=160); plt.close()
 
 
@@ -267,6 +276,7 @@ def main_figure(per_mol, labels, gi=130):
     """compact two-panel figure for the main text: one molecule and its annotated diagram"""
     import matplotlib; matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    _paper_style()
     m = [x for x in per_mol if x[0] == gi]
     if not m:
         return
