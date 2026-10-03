@@ -83,6 +83,8 @@ def tu_table():
             rows[mp].append(fmt(sm.mean(), sm.std(ddof=1)) if sm is not None else PH)
         st = tu_scores(P, ("topo", "full_static_fast" + SUF))
         rows["static"].append(fmt(st.mean(), st.std(ddof=1)) if st is not None else PH)
+        bt = tu_scores(P, ("baseline", "betti_fast" + SUF))
+        rows["betti"].append(fmt(bt.mean(), bt.std(ddof=1)) if bt is not None else PH)
         rows["base"].append(fmt(b.mean(), b.std(ddof=1)) if b is not None else PH)
         rows["wide"].append(fmt(w.mean(), w.std(ddof=1)) if w is not None else PH)
         rows["full"].append(fmt(t.mean(), t.std(ddof=1)) if t is not None else PH)
@@ -101,7 +103,7 @@ def tu_table():
     print("% columns: " + " & ".join(NAMES.get(d, d) for d in TU))
     for label, key in [("MLP (no message passing)", "mlp"), ("GCN", "gcn"), ("GIN", "gin"),
                        ("GSN (cycles 3--6)", "gsn"), ("PPGN backbone", "base"),
-                       ("PPGN backbone, widened", "wide"), ("PPGN+PH, static control", "static"),
+                       ("PPGN backbone, widened", "wide"), ("PPGN+PH, static control", "static"), ("PPGN + Betti numbers", "betti"),
                        ("PPGN+PH (ours)", "full"), ("Paired gain", "gain"),
                        ("Paired 95\\% CI", "ci"), ("Permutation $p$", "perm"),
                        ("Wilcoxon $p$ (exact)", "wil"), ("Folds better", "pos")]:
@@ -118,7 +120,8 @@ def fixed_table():
     models = [("MLP (no message passing)", ("mlp", "fast")), ("GCN", ("gcn", "fast")), ("GIN", ("gin", "fast")),
               ("GSN (cycles 3--6)", ("gsn", "fast")), ("PPGN backbone", ("baseline", "fast")),
               ("PPGN backbone, widened", ("baseline", "wide_fast")),
-              ("PPGN+PH, static control", ("topo", "full_static_fast")), ("PPGN+PH (ours)", ("topo", "full_fast"))]
+              ("PPGN+PH, static control", ("topo", "full_static_fast")),
+              ("PPGN + Betti numbers", ("baseline", "betti_fast")), ("PPGN+PH (ours)", ("topo", "full_fast"))]
     pools_by = {ds: pools(ds) for ds, _, _ in specs}
     for label, (m, v) in models:
         cells = []

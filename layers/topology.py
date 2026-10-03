@@ -112,7 +112,7 @@ class GraphStruct:
     __slots__ = ("simplices_list", "simplex_to_idx", "S", "M", "dim_batches",
                  "simplex_dim", "tph",
                  "f_flat_cpu", "f_seg_cpu", "f_counts_cpu",
-                 "face_tables_cpu", "_dev_cache")
+                 "face_tables_cpu", "_dev_cache", "betti")
 
     def __init__(self, adj, max_dim):
         M = adj.shape[0]
@@ -128,6 +128,7 @@ class GraphStruct:
             offsets[k] = len(simplices_list)
             simplices_list.extend(map(tuple, by_dim_arr[k].tolist()))
         self.simplices_list = simplices_list
+        self.betti = None                    # filled lazily by betti_vector()
         self.simplex_to_idx = dict(zip(simplices_list, range(len(simplices_list))))
         self.S = len(simplices_list)
 
@@ -189,6 +190,23 @@ class GraphStruct:
 
 _STRUCT_CACHE = {}
 _STRUCT_CACHE_MAX = 200000
+
+
+def betti_vector(st, max_dim):
+    """Betti numbers beta_0..beta_max_dim of the (truncated) clique complex of one
+    graph, over Z/11 (gudhi's default field, as in the persistence computation).
+    Filtration-independent; computed once per graph and cached on the struct.
+    Used by the Betti-number control (homology without a learned filtration)."""
+    if st.betti is None or len(st.betti) != max_dim + 1:
+        import gudhi
+        tree = gudhi.SimplexTree()
+        for s in st.simplices_list:
+            if len(s) - 1 <= max_dim:
+                tree.insert(list(s), filtration=0.0)
+        tree.compute_persistence(persistence_dim_max=True)
+        b = list(tree.betti_numbers())[:max_dim + 1]
+        st.betti = tuple(b + [0] * (max_dim + 1 - len(b)))
+    return st.betti
 
 
 def get_graph_struct(adj, max_dim):

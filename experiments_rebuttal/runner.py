@@ -543,6 +543,27 @@ PLANS["static_extra_tu_fast"] = [dict(dataset=ds, model="topo", seed=0, fold=f, 
 PLANS["static_zinc_fast_s10"] = [dict(dataset="ZINC", model="topo", seed=sd, fold=1, epochs=None,
                                       variant="full_static_fast", overrides=dict(STATIC)) for sd in range(10)]
 
+# BETTI CONTROL: the backbone with the Betti numbers of K_2(G) appended once
+# (input diagonal channels + a linear readout head) -- homology without a
+# learned filtration, the reverse of the static control.
+#   compare_variant.py DS betti_fast   -> full_fast against the Betti control
+BETTI = dict(FAST, betti_control=True, topo_max_simplex_dim=2)
+_TU8 = ["MUTAG", "PTC", "IMDBBINARY", "IMDBMULTI", "ENZYMES", "NCI1", "NCI109"]
+PLANS["betti_fast"] = [dict(dataset=ds, model="baseline", seed=0, fold=f, epochs=None,
+                            variant="betti_fast", overrides=dict(BETTI))
+                       for ds in _TU8 for f in range(1, 11)]
+PLANS["betti_fast_proteins"] = [dict(dataset="PROTEINS", model="baseline", seed=0, fold=f, epochs=None,
+                                     variant="betti_fast", overrides=dict(BETTI)) for f in range(1, 11)]
+PLANS["betti_zinc_fast_s10"] = [dict(dataset="ZINC", model="baseline", seed=sd, fold=1, epochs=None,
+                                     variant="betti_fast", overrides=dict(BETTI)) for sd in range(10)]
+PLANS["betti_molhiv_fast_s10"] = [dict(dataset="MOLHIV", model="baseline", seed=sd, fold=1, epochs=None,
+                                       variant="betti_fast", overrides=dict(BETTI)) for sd in range(10)]
+# IMDB-B with two more seeds (1, 2) for baseline and the full model: the
+# per-fold accuracies are averaged over seeds before the paired tests, which
+# reduces fold noise (compare_variant.py IMDBBINARY fast picks them up).
+PLANS["imdbb_seeds_fast"] = [j for j in improve_plan(["IMDBBINARY"], seeds=(1, 2), extra=FAST, tag="_fast")
+                             if j["model"] == "baseline" or j.get("variant") == "full_fast"]
+
 # (2) STRUCTURE ONLY: node labels removed (adjacency only), baseline and full.
 #   compare_variant.py DS struct_fast   -> row full_struct_fast
 STRUCT_B = dict(FAST, structure_only=True)

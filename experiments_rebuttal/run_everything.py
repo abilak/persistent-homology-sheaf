@@ -51,7 +51,8 @@ MAIN_PLANS = [  # main tables (no molhiv)
     "core_fast", "extra_tu_fast", "zinc_fast_s10",
     "wide_fast", "wide_extra_tu_fast", "wide_zinc_fast_s10", "wide_fast_proteins",
     "mp_fast", "mp_zinc_fast_s10",
-    "static_fast", "static_zinc_fast_s10", "static_fast_proteins", "static_extra_tu_fast"]
+    "static_fast", "static_zinc_fast_s10", "static_fast_proteins", "static_extra_tu_fast",
+    "betti_fast", "betti_zinc_fast_s10", "betti_fast_proteins", "imdbb_seeds_fast"]
 STUDY_PLANS = [  # appendix studies
     "structure_fast", "structure_fast_proteins", "placement_fast", "placement_zinc_fast_s10",
     "ablation_min_fast", "zinc_ablation_fast",
@@ -95,6 +96,15 @@ def expressivity_jobs():
                    os.path.join(EXPR, "srg_analysis.done"), copy="experiments_rebuttal/srg_results.json"),
         script_job("srg_seeds", ["experiments_rebuttal/srg_seeds.py"],
                    os.path.join(EXPR, "srg_seeds.done"), copy="experiments_rebuttal/srg_seeds_results.json"),
+        # cone witness: Betti numbers / simplex counts / ranks agree, 3-WL-equivalent,
+        # separated only through the learned filtration
+        script_job("witness_cone", ["experiments_rebuttal/witness_cone.py", "--seeds=30"],
+                   os.path.join(EXPR, "witness_cone.done"), copy="rebuttal_results/witness_cone.json"),
+        # the cone witness as a supervised task at the training configuration D=2, P=1
+        script_job("cone_classification", ["experiments_rebuttal/srg_classification.py", "CONE", "--D=2", "--P=1",
+                                           "--seeds=3", "--models=gin,gsn,baseline,topo",
+                                           "--out=rebuttal_results/srg_classification_cone.json"],
+                   "rebuttal_results/srg_classification_cone.json"),
         script_job("count_vs_ph", ["experiments_rebuttal/count_vs_ph.py"],
                    os.path.join(EXPR, "count_vs_ph.done"), copy="experiments_rebuttal/count_vs_ph_results.json"),
         script_job("srg_classification", ["experiments_rebuttal/srg_classification.py", "--seeds=3"],

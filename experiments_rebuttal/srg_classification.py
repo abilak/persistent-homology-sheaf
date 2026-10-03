@@ -69,10 +69,23 @@ FINAL_TOPO = dict(topo_multiplicity=True, topo_norm_stats=True, topo_essential=T
                   topo_filt_squash=True, topo_readout=True)
 
 
+# clique-complex dimension D and homology dimension P (--D=2 --P=1 is the
+# configuration of the TU experiments; the default D=3, P=2 includes 4-cliques)
+D_SIMPLEX, P_PH = 3, 2
+
+
+def _cone(G):
+    H = nx.convert_node_labels_to_integers(G)
+    n = H.number_of_nodes()
+    H.add_node(n)
+    H.add_edges_from((n, v) for v in range(n))
+    return H
+
+
 def cfg(num_classes, model_type):
     arch = dict(block_features=[64, 64], depth_of_mlp=2, new_suffix=True,
-                use_topology=False, topo_hidden_dim=32, topo_max_ph_dim=2,
-                topo_num_stats=16, topo_max_simplex_dim=3)  # dim3 => 4-cliques
+                use_topology=False, topo_hidden_dim=32, topo_max_ph_dim=P_PH,
+                topo_num_stats=16, topo_max_simplex_dim=D_SIMPLEX)
     if model_type == 'topo':
         arch['use_topology'] = True
         arch.update(FINAL_TOPO)
@@ -150,6 +163,12 @@ TASKS = {
         [triangular_graph(8)] + chang_graphs(),
     "Paley(25) vs L3(5) [srg(25,12,5,6)]":
         [paley_graph(25), latin_square_L3_5()],
+    # Cone witness (run with --D=2 --P=1): 3-WL-equivalent, and the clique
+    # complexes K_2 have identical simplex counts and Betti numbers, so every
+    # filtration-independent invariant agrees; only a learned filtration that
+    # orders the graph's own triangles before the apex triangles separates them.
+    "cone(Rook(4,4)) vs cone(Shrikhande) [D=2 witness]":
+        [_cone(rook_graph(4)), _cone(shrikhande_graph())],
 }
 MODELS = ['mlp', 'gcn', 'gin', 'gsn', 'baseline', 'topo']
 
@@ -158,8 +177,8 @@ def _select_tasks(names):
     """Optional CLI filter: python srg_classification.py CSL SR16."""
     if not names:
         return TASKS
-    aliases = {"CSL": "CSL", "SR16": "Rook", "SR28": "T(8)",
-               "SR25": "Paley(25)", "SR49": "Paley(49)"}
+    aliases = {"CSL": "CSL", "SR16": "Rook(4,4) vs", "SR28": "T(8)",
+               "SR25": "Paley(25)", "SR49": "Paley(49)", "CONE": "cone("}
     keys = []
     for name in names:
         needle = aliases.get(name, name)
@@ -181,6 +200,11 @@ if __name__ == '__main__':
     N_SEEDS = _parse_int_flag("seeds", 1)
     N_EPOCHS = _parse_int_flag("epochs", 150)
     N_COPIES = _parse_int_flag("copies", 120)
+    D_SIMPLEX = _parse_int_flag("D", D_SIMPLEX)
+    P_PH = _parse_int_flag("P", P_PH)
+    for a_ in sys.argv[1:]:
+        if a_.startswith("--models="):
+            MODELS = a_.split("=", 1)[1].split(",")
     print(f"# {N_SEEDS} seed(s), {N_EPOCHS} epochs, {N_COPIES} copies/class\n")
     results = {}
     for task, graphs in tasks.items():
@@ -215,6 +239,11 @@ if __name__ == '__main__':
                       f"{np.mean(tes)*100:>5.1f}/{np.max(tes)*100:>5.1f}%      "
                       f"({time.time()-t0:.0f}s){flag}")
         print()
-    with open('rebuttal_results/srg_classification.json', 'w') as f:
-        json.dump(results, f, indent=2)
-    print("saved rebuttal_results/srg_classification.json")
+    # --out=PATH keeps task-specific runs (e.g. CONE) from overwriting the main results
+    out = next((s.split("=", 1)[1] for s in sys.argv[1:] if s.startswith("--out=")),
+               'rebuttal_results/srg_classification.json')
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    with open(out, 'w') as f:
+        json.dump(dict(D=D_SIMPLEX, P=P_PH, results=results) if out != 'rebuttal_results/srg_classification.json'
+                  else results, f, indent=2)
+    print(f"saved {out}")

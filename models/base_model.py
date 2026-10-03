@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import layers.layers as layers
 import layers.modules as modules
-from layers.topology import TopologyLayer, build_graph_structs
+from layers.topology import TopologyLayer, build_graph_structs, betti_vector
 
 
 class BaseModel(nn.Module):
@@ -19,6 +19,15 @@ class BaseModel(nn.Module):
 
         # Topology config (disabled by default for backward compat)
         self.use_topology = getattr(config.architecture, 'use_topology', False)
+
+        # Betti-number control (backbone only): the Betti numbers of K_D(G),
+        # computed once per graph, are appended to the input (as diagonal
+        # channels) and to the readout (a linear head). Homology without a
+        # learned filtration -- the reverse of the static control.
+        self.betti_control = (not self.use_topology) and getattr(config.architecture, 'betti_control', False)
+        self.betti_dim = getattr(config.architecture, 'topo_max_simplex_dim', 2)
+        if self.betti_control:
+            original_features_num += self.betti_dim + 1
 
         # Which blocks get a topology branch. 'all' (default) reproduces the
         # submitted model; 'last' attaches it only after the final equivariant
@@ -96,6 +105,9 @@ class BaseModel(nn.Module):
                 nn.init.zeros_(head.weight); nn.init.zeros_(head.bias)
                 self.topo_fc.append(head)
 
+        self.betti_fc = (nn.Linear(self.betti_dim + 1, self.config.num_classes)
+                         if self.betti_control else None)
+
         # Second part
         self.fc_layers = nn.ModuleList()
         if use_new_suffix:
@@ -137,6 +149,19 @@ class BaseModel(nn.Module):
             simplices_batch = self._build_simplicial_complexes(input)
 
         node_mask = getattr(input, '_node_mask', None)
+        betti_feats = None
+        if self.betti_control:
+            structs = self._build_simplicial_complexes(input)
+            betti_feats = torch.log1p(torch.tensor(
+                [betti_vector(st, self.betti_dim) for st in structs],
+                dtype=x.dtype, device=x.device))                         # (B, D+1)
+            B, _, M, _ = x.shape
+            eye = torch.eye(M, dtype=x.dtype, device=x.device)
+            if node_mask is not None:                                    # real vertices only
+                eye = eye[None] * node_mask[:, None, :].to(x.dtype)      # (B, M, M)
+            else:
+                eye = eye[None].expand(B, M, M)
+            x = torch.cat([x, betti_feats[:, :, None, None] * eye[:, None]], dim=1)
         mask2d = None
         if node_mask is not None:
             mask2d = (node_mask[:, :, None] & node_mask[:, None, :])[:, None].to(x.dtype)
@@ -165,4 +190,6 @@ class BaseModel(nn.Module):
                 x = fc(x)
             scores = x
 
+        if betti_feats is not None:
+            scores = scores + self.betti_fc(betti_feats)
         return scores + topo_scores
