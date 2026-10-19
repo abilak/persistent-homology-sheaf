@@ -1,15 +1,10 @@
 # PPGN + persistent homology
 
-This is the code for our paper **Beyond Weisfeiler-Lehman: Topological Features Increase Graph Neural Network Expressivity**.
+This is the code for our paper **Beyond Weisfeiler-Lehman: Topological Features Increase Graph Neural Network Expressivity**, under review at AISTATS 2026-27.
 
-Graph neural networks are limited by the Weisfeiler-Lehman (WL) test, which means there are pairs of different graphs they can't tell apart. We build off the paper PPGN (Provably Powerful Graph Networks, Maron et al. 2019, https://arxiv.org/abs/1905.11136), which is already as strong as 3-WL, and add a topology branch to it. After each PPGN block the model does the following:
+GNNs are limited by the k-WL/FWL tests (Weisfeiler-Lehman), meaning there are pairs of different graphs they can't tell apart (graph isomorphism). We build off the PPGN paper (Provably Powerful Graph Networks, Maron et al. 2019, https://arxiv.org/abs/1905.11136), which is provably as strong as 3-WL, and add a topology branch to it to improveits expressivity and experimental performance. After each PPGN block the model learns sa filtration function on the clique complex of the graph, computes the PH of that filtration, makes the PH diagrams to vectors with attention pooling, and adds them to the original PPGN model features with a gated residual (which lets us let in a certain amount of topology, learned by the model).
 
-1. learns a filtration on the clique complex of the graph (every vertex, edge and triangle gets a value computed from the PPGN features),
-2. computes persistent homology of that filtration (connected components, cycles, voids and how long they last),
-3. turns the persistence diagrams into vectors with attention pooling,
-4. and adds them back into the PPGN features through a gated residual.
-
-With these additions, the model can separate graphs that 3-WL can't, such as the 4x4 rook graph and the Shrikhande graph. The persistence computation runs on the GPU with plain tensor ops (`layers/torch_ph.py`), and on CPU it uses gudhi instead.
+These additions let the model separate graphs that 3-WL can't, such as the 4x4 rook graph and the Shrikhande graph. The persistence computation runs on the GPU with plain tensor ops (`layers/torch_ph.py`), and on CPU it uses gudhi instead.
 
 The PPGN part and the data loading started from a PyTorch port of the original PPGN code (Apache 2.0, see `LICENSE`). The original TensorFlow code is at https://github.com/hadarser/ProvablyPowerfulGraphNetworks.
 
@@ -42,7 +37,7 @@ The BREC benchmark gets downloaded the first time you run `experiments/brec.py`.
 
 ## Running things
 
-Run everything from the repo root. Results go into `results/`.
+Everything must be run from the repo root. Results go into the directory `results/`.
 
 To train one model, pick a dataset, a model (`baseline`, `topo`, `mlp`, `gcn`, `gin` or `gsn`), a seed and a fold
 
@@ -50,17 +45,17 @@ To train one model, pick a dataset, a model (`baseline`, `topo`, `mlp`, `gcn`, `
 python experiments/run_job.py MUTAG topo 0 1 results/MUTAG/test.json
 ```
 
-That trains the vanilla topo model with the default settings. The settings we actually used in the paper are passed as a json string of overrides, which is easier to get from the runner below.
+This trains the vanilla topo model with the default settings. The settings used in the paper are passed as a json string of overrides, which is easier to get from the runner below.
 
-`experiments/runner.py` has every set of runs from the paper (main TU table, ZINC, molhiv, the widened backbone, the static and Betti controls, the message passing baselines, ablations, depth and so on). Running a plan launches its jobs in parallel and skips anything that already has a result file, so you can stop it and start it again whenever.
+`experiments/runner.py` has all runs from the paper (TU dataset table, ZINC, molhiv, widened backbones, static and Betti controls, message-passing baselines, ablations, depth, etc.). Running a plan launches the jobs in parallel and skips anything already with a result file, so you can stop it and start it again whenever.
 
 ```bash
 python experiments/runner.py core_fast 3 1
 ```
 
-The arguments are the plan name, how many jobs run at once, and how many CPU threads each job gets. Run it with no arguments to list all the plans.
+The arguments are the plan name, how many jobs run at once, and how many CPU threads each job gets. You may run it with no arguments to list all the plans.
 
-This one runs every plan plus all the expressivity and interpretability experiments from one queue, and the timing benchmark at the end. It takes days on one GPU.
+This command runs every plan along with all the expressivity and interpretability experiments from one queue, and the timing benchmark at the end. 
 
 ```bash
 python experiments/runner.py all 3
@@ -68,35 +63,31 @@ python experiments/runner.py all 3
 
 Add `--dry` to see how much is left without running anything.
 
-Once results are in, this prints the paper tables as LaTeX rows
+Once results are in, this command outputs the paper tables as LaTeX rows
 
 ```bash
 python experiments/tables.py
 ```
 
-and this compares every model on one dataset against the backbone fold by fold (paired bootstrap interval, permutation test and Wilcoxon test)
+and the next command compares every model on one dataset against the backbone fold by fold with various statistical tests: 
 
 ```bash
 python experiments/tables.py NCI1
 ```
 
-### The other experiments
+### Other Experiments
 
 | What | Command |
 |---|---|
 | Strongly regular pairs at random init | `python experiments/srg.py` (add `--seeds 30` for the per seed version) |
-| Clique counts vs homology | `python experiments/srg.py count` |
+| Clique counts vs. homology | `python experiments/srg.py count` |
 | Cones of the rook and Shrikhande graphs | `python experiments/srg.py cone --seeds=30` |
 | Classifying strongly regular graphs and CSL | `python experiments/sr_classification.py --seeds=3` |
 | BREC | `python experiments/brec.py --model topo --sample-num 400 --epochs 20 --out results/brec/topo.json` (also `ppgn` and `gin`) |
-| What the filtration learns on MUTAG | `python experiments/interpret_mutag.py` (and `--seed=1`, `--seed=2`) |
-| Training cost, CPU vs GPU persistence | `python experiments/timing.py NCI1 MUTAG PROTEINS IMDBBINARY ZINC` |
+| Interpretability of filtration on MUTAG | `python experiments/interpret_mutag.py` (and `--seed=1`, `--seed=2`) |
+| Training cost, CPU vs GPU PH | `python experiments/timing.py NCI1 MUTAG PROTEINS IMDBBINARY ZINC` |
 
 To pick a GPU set `DEVICE`, for example `DEVICE=cuda:1 python experiments/runner.py core_fast 3 1`.
-
-## How we evaluate
-
-The TU datasets use the protocol from Xu et al. (2019). That's ten folds, one seed, and a single epoch picked by the mean validation accuracy over all folds, then every fold is reported at that epoch. All models share the folds, the batching, the learning rate schedule and the number of epochs. ZINC and ogbg-molhiv use their standard splits with ten seeds, and we report the test number at the epoch with the best validation number.
 
 ## Tests
 
@@ -104,7 +95,7 @@ The TU datasets use the protocol from Xu et al. (2019). That's ten folds, one se
 python -m pytest tests
 ```
 
-These check that the GPU persistence gives the same diagrams as gudhi, that the model is permutation invariant, and that padded batches give the same outputs as running each graph alone. It takes about ten seconds on a laptop.
+These check that the GPU persistence gives the same diagrams as gudhi, that the model is permutation invariant, and that padded batches give the same outputs as running each graph alone.
 
 ## Where stuff is
 
