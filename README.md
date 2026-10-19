@@ -1,59 +1,111 @@
-# Provably Powerful Graph Networks
-This repository holds a pytorch version of the code for the paper: https://arxiv.org/abs/1905.11136.
-The code used to achieve the results in the paper is using tensorflow and can be found in:
-https://github.com/hadarser/ProvablyPowerfulGraphNetworks.
-If you want to learn more about it, check out these two blog posts explaining invariant graph networks and their power: http://irregulardeep.org
+# PPGN + persistent homology
+
+This is the code for our paper **Beyond Weisfeiler-Lehman: Topological Features Increase Graph Neural Network Expressivity**.
+
+Graph neural networks are limited by the Weisfeiler-Lehman (WL) test, which means there are pairs of different graphs they just can't tell apart. We take PPGN (Provably Powerful Graph Networks, Maron et al. 2019, https://arxiv.org/abs/1905.11136), which is already as strong as 3-WL, and add a topology branch to it. After each PPGN block the model
+
+1. learns a filtration on the clique complex of the graph (every vertex, edge and triangle gets a value computed from the PPGN features),
+2. computes persistent homology of that filtration (connected components, cycles, voids and how long they last),
+3. turns the persistence diagrams into vectors with attention pooling,
+4. and adds them back into the PPGN features through a gated residual.
+
+With this the model can separate graphs that 3-WL can't, like the 4x4 rook graph and the Shrikhande graph. The persistence computation runs on the GPU with plain tensor ops (`layers/torch_ph.py`), and on CPU it uses gudhi instead. Both give the same diagrams.
+
+The PPGN part and the data loading started from a PyTorch port of the original PPGN code (Apache 2.0, see `LICENSE`). The original TensorFlow code is at https://github.com/hadarser/ProvablyPowerfulGraphNetworks.
+
+## Setup
+
+You need Python 3.10 or newer. Install PyTorch for your CUDA version first (https://pytorch.org), then
+
+```bash
+pip install -r requirements.txt
+```
+
+Everything also runs on CPU, it's just slow for the bigger datasets.
 
 ## Data
-Before running the code the data should be downloaded using the following commands:
 
-```
-cd ProvablyPowerfulGraphNetworks
+The TU datasets (MUTAG, PTC, NCI1, NCI109, PROTEINS, ENZYMES, IMDB-B, IMDB-M) come with the standard 10 fold splits from Xu et al. Download them with
+
+```bash
 python utils/get_data.py
 ```
 
-This script will download all the data from Dropbox links. 
+This puts them in `data/benchmark_graphs/`. ZINC-12k and ogbg-molhiv have their own scripts
 
-
-
-## Code
-
-### Prerequisites
-
-python 3.7.3
-
-pytorch 1.2
-
-Additional modules: numpy, pandas, matplotlib, tqdm, easydict
-
-
-
-### Running the tests
-
-The folder main_scripts contains scripts that run different experiments:
-1. To run 10-fold cross-validation with our chosen hyper-parameters, run the main_10fold_experiment.py script. You can choose the dataset in 10fold_config.json or using the command line option. These hyper-parameters refer to version 1 from the paper. 
-example:
-to run 10-fold cross-validation experiment:
-```
-python main_scripts/main_10fold_experiment.py --config=configs/10fold_config.json --dataset_name=NCI1
-```
-2. To run the QM9 experiment with our hyper-parameters, run the main_qm9_experiment.py script:
-```
-python main_scripts/main_qm9_experiment.py --config=configs/qm9_config.json
+```bash
+python utils/get_data.py zinc
+python utils/get_data.py molhiv
 ```
 
-In the paper, we have two models for the QM9 task: the first predicts a all the outputs quantity at once, while the other predicts a single chosen output quantity. You can switch between these models by changing the following line in the configs/qm9_config.json:
-```
-  "target_param": false,
-```
-to the chosen target (range 0-11).
+The BREC benchmark gets downloaded the first time you run `experiments/brec.py`.
 
+## Running things
 
-Note: The script mentioned in the data section above will download a processed version of QM9 which is needed for our main code. We also share our processing code (requires pytorch), which is is based on the pytorch-geometric package.
-see: https://pytorch-geometric.readthedocs.io/en/latest/_modules/torch_geometric/datasets/qm9.html#QM9:
+Run everything from the repo root. Results go into `results/`.
 
+To train one model, pick a dataset, a model (`baseline`, `topo`, `mlp`, `gcn`, `gin` or `gsn`), a seed and a fold
+
+```bash
+python experiments/run_job.py MUTAG topo 0 1 results/MUTAG/test.json
 ```
-cd ProvablyPowerfulGraphNetworks
-python utils/get_qm9_data.py
+
+That trains the plain topo model with the default settings. The settings we actually used in the paper are passed as a json string of overrides, which is easier to get from the runner below.
+
+`experiments/runner.py` has every set of runs from the paper (main TU table, ZINC, molhiv, the widened backbone, the static and Betti controls, the message passing baselines, ablations, depth and so on). Running a plan launches its jobs in parallel and skips anything that already has a result file, so you can stop it and start it again whenever.
+
+```bash
+python experiments/runner.py core_fast 3 1
 ```
-# persistent-homology-sheaf
+
+The arguments are the plan name, how many jobs run at once, and how many CPU threads each job gets. Run it with no arguments to list all the plans.
+
+This one runs every plan plus all the expressivity and interpretability experiments from one queue, and the timing benchmark at the end. It takes days on one GPU.
+
+```bash
+python experiments/runner.py all 3
+```
+
+Add `--dry` to see how much is left without running anything.
+
+Once results are in, this prints the paper tables as LaTeX rows
+
+```bash
+python experiments/tables.py
+```
+
+and this compares every model on one dataset against the backbone fold by fold (paired bootstrap interval, permutation test and Wilcoxon test)
+
+```bash
+python experiments/tables.py NCI1
+```
+
+### The other experiments
+
+| What | Command |
+|---|---|
+| Strongly regular pairs at random init | `python experiments/srg.py` (add `--seeds 30` for the per seed version) |
+| Clique counts vs homology | `python experiments/srg.py count` |
+| Cones of the rook and Shrikhande graphs | `python experiments/srg.py cone --seeds=30` |
+| Classifying strongly regular graphs and CSL | `python experiments/sr_classification.py --seeds=3` |
+| BREC | `python experiments/brec.py --model topo --sample-num 400 --epochs 20 --out results/brec/topo.json` (also `ppgn` and `gin`) |
+| What the filtration learns on MUTAG | `python experiments/interpret_mutag.py` (and `--seed=1`, `--seed=2`) |
+| Training cost, CPU vs GPU persistence | `python experiments/timing.py NCI1 MUTAG PROTEINS IMDBBINARY ZINC` |
+
+To pick a GPU set `DEVICE`, for example `DEVICE=cuda:1 python experiments/runner.py core_fast 3 1`.
+
+## How we evaluate
+
+The TU datasets use the protocol from Xu et al. (2019). That's ten folds, one seed, and a single epoch picked by the mean validation accuracy over all folds, then every fold is reported at that epoch. All models share the folds, the batching, the learning rate schedule and the number of epochs. ZINC and ogbg-molhiv use their standard splits with ten seeds, and we report the test number at the epoch with the best validation number.
+
+## Tests
+
+```bash
+python -m pytest tests
+```
+
+These check that the GPU persistence gives the same diagrams as gudhi, that the model is permutation invariant, and that padded batches give the same outputs as running each graph alone. It takes about ten seconds on a laptop.
+
+## Where stuff is
+
+The topology part of the model is in `layers/topology.py` (filtration, persistence diagrams, fusion) and `layers/torch_ph.py` (the GPU persistence). `models/base_model.py` puts it together with the PPGN blocks from `layers/modules.py`, and the message passing baselines are in `models/baseline_models.py`. Data loading is in `data_loader/`, the training loop in `trainers/`, and everything you'd actually run is in `experiments/`.

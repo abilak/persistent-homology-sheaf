@@ -1,9 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
 .idea/
+.DS_Store
 data/
-data_loader/__pycache__/
-.venv
+results/
+rebuttal_results/
+experiments/
 
-layers/__pycache__/
-models/__pycache__/
-trainers/__pycache__/
-utils/__pycache__/
+# papers and other local stuff
+paper*/
+*.zip
+experiments_rebuttal/
+thing.md
