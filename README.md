@@ -1,4 +1,4 @@
-# PPGN + persistent homology
+# PPGN + PH
 
 This is the code for our paper **Beyond Weisfeiler-Lehman: Topological Features Increase Graph Neural Network Expressivity**, under review at AISTATS 2026-27.
 
