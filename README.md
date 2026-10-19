@@ -2,14 +2,14 @@
 
 This is the code for our paper **Beyond Weisfeiler-Lehman: Topological Features Increase Graph Neural Network Expressivity**.
 
-Graph neural networks are limited by the Weisfeiler-Lehman (WL) test, which means there are pairs of different graphs they just can't tell apart. We take PPGN (Provably Powerful Graph Networks, Maron et al. 2019, https://arxiv.org/abs/1905.11136), which is already as strong as 3-WL, and add a topology branch to it. After each PPGN block the model
+Graph neural networks are limited by the Weisfeiler-Lehman (WL) test, which means there are pairs of different graphs they can't tell apart. We build off the paper PPGN (Provably Powerful Graph Networks, Maron et al. 2019, https://arxiv.org/abs/1905.11136), which is already as strong as 3-WL, and add a topology branch to it. After each PPGN block the model does the following:
 
 1. learns a filtration on the clique complex of the graph (every vertex, edge and triangle gets a value computed from the PPGN features),
 2. computes persistent homology of that filtration (connected components, cycles, voids and how long they last),
 3. turns the persistence diagrams into vectors with attention pooling,
 4. and adds them back into the PPGN features through a gated residual.
 
-With this the model can separate graphs that 3-WL can't, like the 4x4 rook graph and the Shrikhande graph. The persistence computation runs on the GPU with plain tensor ops (`layers/torch_ph.py`), and on CPU it uses gudhi instead. Both give the same diagrams.
+With these additions, the model can separate graphs that 3-WL can't, such as the 4x4 rook graph and the Shrikhande graph. The persistence computation runs on the GPU with plain tensor ops (`layers/torch_ph.py`), and on CPU it uses gudhi instead.
 
 The PPGN part and the data loading started from a PyTorch port of the original PPGN code (Apache 2.0, see `LICENSE`). The original TensorFlow code is at https://github.com/hadarser/ProvablyPowerfulGraphNetworks.
 
@@ -21,7 +21,7 @@ You need Python 3.10 or newer. Install PyTorch for your CUDA version first (http
 pip install -r requirements.txt
 ```
 
-Everything also runs on CPU, it's just slow for the bigger datasets.
+Everything also runs on CPU, however, it is much slower (especially for bigger datasets).
 
 ## Data
 
@@ -50,7 +50,7 @@ To train one model, pick a dataset, a model (`baseline`, `topo`, `mlp`, `gcn`, `
 python experiments/run_job.py MUTAG topo 0 1 results/MUTAG/test.json
 ```
 
-That trains the plain topo model with the default settings. The settings we actually used in the paper are passed as a json string of overrides, which is easier to get from the runner below.
+That trains the vanilla topo model with the default settings. The settings we actually used in the paper are passed as a json string of overrides, which is easier to get from the runner below.
 
 `experiments/runner.py` has every set of runs from the paper (main TU table, ZINC, molhiv, the widened backbone, the static and Betti controls, the message passing baselines, ablations, depth and so on). Running a plan launches its jobs in parallel and skips anything that already has a result file, so you can stop it and start it again whenever.
 
