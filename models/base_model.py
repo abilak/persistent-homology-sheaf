@@ -1,91 +1,114 @@
+import os
 import torch
 import torch.nn as nn
-import layers.layers as layers
-import layers.modules as modules
-from layers.topology import TopologyLayer, build_clique_complex
 
+import layers.modules as modules
+from layers.topology import TopologyLayer, build_structs, betti_vec
+
+def get_device():
+    if(os.environ.get('DEVICE')):
+        return torch.device(os.environ['DEVICE'])
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+DEVICE = get_device()
 
 class BaseModel(nn.Module):
     def __init__(self, config):
-        """
-        Build the model computation graph, until scores/values are returned at the end
-        """
         super().__init__()
-
         self.config = config
-        use_new_suffix = config.architecture.new_suffix  # True or False
-        block_features = config.architecture.block_features  # List of number of features in each regular block
-        original_features_num = config.node_labels + 1  # Number of features of the input
+        arch = config.architecture
+        block_features = arch.block_features
+        in_f = config.node_labels + 1
 
-        # Topology config (disabled by default for backward compat)
-        self.use_topology = getattr(config.architecture, 'use_topology', False)
+        self.use_topo = arch.get('use_topology', False)
+        self.max_dim = arch.get('topo_max_simplex_dim', 2)
+        self.betti_control = not self.use_topo and arch.get('betti_control', False)
+        if(self.betti_control):
+            in_f += self.max_dim + 1
 
-        # First part - sequential equivariant blocks + optional topology
-        last_layer_features = original_features_num
+        if(arch.get('topo_apply_layers', 'all') == 'last'):
+            topo_at = {len(block_features) - 1}
+        else:
+            topo_at = set(range(len(block_features)))
+
         self.reg_blocks = nn.ModuleList()
-        self.topo_layers = nn.ModuleList() if self.use_topology else None
-        for layer, next_layer_features in enumerate(block_features):
-            mlp_block = modules.RegularBlock(config, last_layer_features, next_layer_features)
-            self.reg_blocks.append(mlp_block)
-            if self.use_topology:
-                topo_hidden = getattr(config.architecture, 'topo_hidden_dim', 64)
-                topo_ph_dim = getattr(config.architecture, 'topo_max_ph_dim', 1)
-                topo_stats = getattr(config.architecture, 'topo_num_stats', 4)
-                self.topo_layers.append(
-                    TopologyLayer(eqv_features=next_layer_features,
-                                  hidden_dim=topo_hidden,
-                                  max_ph_dim=topo_ph_dim,
-                                  num_stats=topo_stats)
-                )
-            last_layer_features = next_layer_features
+        self.topo_layers = nn.ModuleList() if self.use_topo else None
+        last = in_f
+        for(i, nf) in enumerate(block_features):
+            self.reg_blocks.append(modules.RegularBlock(config, last, nf))
+            if(self.use_topo):
+                if(i not in topo_at):
+                    self.topo_layers.append(nn.Identity())
+                else:
+                    self.topo_layers.append(TopologyLayer(nf, hid=arch.get('topo_hidden_dim', 64), pdim=arch.get('topo_max_ph_dim', 1), nstat=arch.get('topo_num_stats', 4), norm_st=arch.get('topo_norm_stats', False), use_ess=arch.get('topo_essential', False), squash=arch.get('topo_filt_squash', False), static=arch.get('topo_static', False), ph_backend=arch.get('topo_ph_backend', 'auto')))
+            last = nf
 
-        # Second part
+        self.topo_readout = self.use_topo and arch.get('topo_readout', False)
+        self.topo_fc = nn.ModuleList()
+        if(self.topo_readout):
+            for tl in self.topo_layers:
+                if(isinstance(tl, nn.Identity)):
+                    self.topo_fc.append(nn.Identity())
+                    continue
+                head = nn.Linear(tl.gdim, config.num_classes)
+                nn.init.zeros_(head.weight)
+                nn.init.zeros_(head.bias)
+                self.topo_fc.append(head)
+        self.betti_fc = nn.Linear(self.max_dim + 1, config.num_classes) if self.betti_control else None
+
         self.fc_layers = nn.ModuleList()
-        if use_new_suffix:
-            for output_features in block_features:
-                # each block's output will be pooled (thus have 2*output_features), and pass through a fully connected
-                fc = modules.FullyConnected(2*output_features, self.config.num_classes, activation_fn=None)
-                self.fc_layers.append(fc)
+        for nf in block_features:
+            self.fc_layers.append(modules.FullyConnected(2 * nf, config.num_classes, act=None))
 
-        else:  # use old suffix
-            # Sequential fc layers
-            self.fc_layers.append(modules.FullyConnected(2*block_features[-1], 512))
-            self.fc_layers.append(modules.FullyConnected(512, 256))
-            self.fc_layers.append(modules.FullyConnected(256, self.config.num_classes, activation_fn=None))
-
-    def _build_simplicial_complexes(self, input):
-        """Extract adjacency from channel 0 and build clique complexes per graph."""
-        adj_batch = input[:, 0, :, :].detach().cpu().numpy()
-        max_dim = getattr(self.config.architecture, 'topo_max_simplex_dim', 2)
-        return [build_clique_complex(adj, max_dim=max_dim) for adj in adj_batch]
+    def graph_structs(self, input):
+        adj = getattr(input, '_host_adj', None)
+        if(adj is None):
+            adj = input[:, 0, :, :].detach().cpu().numpy()
+        n_real = getattr(input, '_n_real', None)
+        if(n_real is not None):
+            adj = [adj[b, :n, :n] for b, n in enumerate(n_real)]
+        return build_structs(adj, self.max_dim)
 
     def forward(self, input):
         x = input
-        scores = torch.tensor(0, device=input.device, dtype=x.dtype)
+        scores = x.new_zeros(())
+        tscores = x.new_zeros(())
+        structs = self.graph_structs(input) if self.use_topo else None
+        nmask = getattr(input, '_node_mask', None)
 
-        # Build simplicial complexes once from input adjacency
-        simplices_batch = None
-        if self.use_topology:
-            simplices_batch = self._build_simplicial_complexes(input)
+        betti = None
+        if(self.betti_control):
+            bettis = [betti_vec(st, self.max_dim) for st in self.graph_structs(input)]
+            betti = torch.log1p(torch.tensor(bettis, dtype=x.dtype, device=x.device))
+            B, _, M, _ = x.shape
+            eye = torch.eye(M, dtype=x.dtype, device=x.device)
+            if(nmask is not None):
+                eye = eye[None] * nmask[:, None, :].to(x.dtype)
+            else:
+                eye = eye[None].expand(B, M, M)
+            x = torch.cat([x, betti[:, :, None, None] * eye[:, None]], dim=1)
 
-        for i, block in enumerate(self.reg_blocks):
+        mask2d = None
+        if(nmask is not None):
+            mask2d = (nmask[:, :, None] & nmask[:, None, :])[:, None].to(x.dtype)
+            pool = lambda t: modules.diag_offdiag_maxpool_masked(t, nmask)
+        else:
+            pool = modules.diag_offdiag_maxpool
 
-            # Step 1: equivariant update: X^(l+1/2) = EqvLayer(X^(l))
-            x = block(x)
+        for(i, block) in enumerate(self.reg_blocks):
+            x = block(x, mask2d)
+            if(self.use_topo and not isinstance(self.topo_layers[i], nn.Identity)):
+                x = self.topo_layers[i](x, structs)
+                if(self.topo_readout):
+                    tscores = self.topo_fc[i](self.topo_layers[i].last_g) + tscores
+            scores = self.fc_layers[i](pool(x)) + scores
 
-            # Steps 2-5: topology (filtration on X^(l+1/2) -> PH -> broadcast -> fuse)
-            if self.use_topology:
-                x = self.topo_layers[i](x, simplices_batch)
+        if(betti is not None):
+            scores = scores + self.betti_fc(betti)
+        return scores + tscores
 
-            if self.config.architecture.new_suffix:
-                # use new suffix
-                scores = self.fc_layers[i](layers.diag_offdiag_maxpool(x)) + scores
-
-        if not self.config.architecture.new_suffix:
-            # old suffix
-            x = layers.diag_offdiag_maxpool(x)  # NxFxMxM -> Nx2F
-            for fc in self.fc_layers:
-                x = fc(x)
-            scores = x
-
-        return scores
+def build_model(config):
+    if(config.architecture.get('baseline_type')):
+        from models.baseline_models import BaselineModel
+        return BaselineModel(config).to(DEVICE)
+    return BaseModel(config).to(DEVICE)
